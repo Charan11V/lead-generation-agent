@@ -1,0 +1,22 @@
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.streamlit/secrets.toml
+frequency_agent.db
+*.db
+.DS_Store
+output/runs/
+
+# Generated exports & run artifacts (may contain lead/contact PII)
+output/*
+!output/.gitkeep
+
+# Logs that may contain draft outreach text
+*.jsonl
+dry_run_send_log.jsonl

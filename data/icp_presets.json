@@ -1,0 +1,17 @@
+{
+  "fintech_series_b": {
+    "label": "Exec search · Series B+ Indian fintech (last 90 days)",
+    "service_line": "exec_search",
+    "text": "Series B+ fintech startups in India that raised in the last 90 days"
+  },
+  "gcc_vp": {
+    "label": "Exec search · GCCs in Bengaluru/Hyderabad hiring VP+",
+    "service_line": "exec_search",
+    "text": "GCCs setting up or expanding in Bengaluru or Hyderabad that are hiring for VP+ leadership roles"
+  },
+  "capital_growth": {
+    "label": "Capital advisory · founder-led India, capital decision signals",
+    "service_line": "capital_advisory",
+    "text": "Founder-led and growth-stage companies in India with recent expansion, acquisition, or working-capital / structured-credit signals"
+  }
+}

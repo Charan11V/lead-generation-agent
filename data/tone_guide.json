@@ -1,0 +1,43 @@
+{
+  "brand": "precision, poise, intrigue",
+  "voice": "sharp, credible, not salesy",
+  "structure": ["hook", "proof_points", "low_friction_cta"],
+  "channel_primary": "email",
+  "channel_secondary": "linkedin_note",
+  "channel_reasoning": "Email is the right first-touch for retained search, fractional CXO, and capital advisory: it is professional, reviewable, and does not require login scraping. A shorter LinkedIn note is generated as a secondary artifact for the same facts. WhatsApp is too informal for CXO first-touch.",
+  "email_word_range": [110, 190],
+  "linkedin_word_range": [60, 95],
+  "cta_examples": [
+    "If leadership capacity is on the agenda this quarter, happy to share a tighter read — 15 minutes is enough.",
+    "Worth a short conversation if this search is live or about to be.",
+    "If useful, I can send two relevant profiles of how similar mandates closed — no deck, no pitch call required."
+  ],
+  "prefer": [
+    "specific observation from a cited public signal",
+    "concise reasoning",
+    "2-3 relevant Frequency proof points with outcomes",
+    "understated CTA",
+    "short paragraphs"
+  ],
+  "avoid": [
+    "I hope this email finds you well",
+    "just wanted to reach out",
+    "we are a leading",
+    "synergy",
+    "circle back",
+    "touch base",
+    "hope you're doing well",
+    "excited to connect",
+    "game-changer",
+    "best-in-class",
+    "unlock your potential"
+  ],
+  "rules": [
+    "Lead with the signal, not with Frequency.",
+    "Never invent a number, round, title, or person.",
+    "Only cite proof points that were matched to this lead.",
+    "Do not flatter. Do not over-claim exclusivity.",
+    "If a contact name is missing, address the role (e.g. Founder / CEO) without inventing a name.",
+    "If a fact is inferred, do not put it in the sendable draft."
+  ]
+}

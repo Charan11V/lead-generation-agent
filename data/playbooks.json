@@ -1,0 +1,44 @@
+{
+  "exec_search": {
+    "label": "Executive search",
+    "good_lead": "Growth or expanding company with a leadership gap, new mandate, VP+/CXO hiring, or a funding event that implies a team build.",
+    "noise": "Generic 'we're hiring' posts, stale rounds, SEO listicles, existing Frequency clients.",
+    "preferred_contacts": ["founder", "ceo", "chro", "head of talent", "vp talent", "functional cxo"],
+    "signal_to_contact": {
+      "funding": ["founder", "ceo"],
+      "leadership_departure": ["founder", "ceo", "chro"],
+      "hiring_surge": ["chro", "head of talent", "founder", "ceo"],
+      "expansion": ["founder", "ceo", "chro"],
+      "new_executive": ["founder", "ceo"],
+      "default": ["founder", "ceo"]
+    },
+    "proof_bias": ["exec_search"]
+  },
+  "fractional_cxo": {
+    "label": "Fractional CXO",
+    "good_lead": "Scaling company that likely cannot yet absorb a full-time CXO, with a clear functional gap in finance, product, GTM, tech, or HR.",
+    "noise": "Enterprises clearly running a retained full-time C-suite search only; companies with no operating gap.",
+    "preferred_contacts": ["founder", "ceo"],
+    "signal_to_contact": {
+      "funding": ["founder", "ceo"],
+      "leadership_departure": ["founder", "ceo"],
+      "hiring_surge": ["founder", "ceo"],
+      "expansion": ["founder", "ceo"],
+      "default": ["founder", "ceo"]
+    },
+    "proof_bias": ["fractional_cxo", "exec_search"]
+  },
+  "capital_advisory": {
+    "label": "Capital advisory",
+    "good_lead": "Founder-led or growth-stage company with a capital decision: expansion, acquisition, working capital, structured credit, or a raise where structure matters more than celebration.",
+    "noise": "Pure talent signals with no capital event; 'we just raised' vanity posts unless a next-round or debt need is implied.",
+    "preferred_contacts": ["founder", "ceo", "cfo"],
+    "signal_to_contact": {
+      "funding": ["founder", "ceo", "cfo"],
+      "acquisition": ["founder", "ceo", "cfo"],
+      "expansion": ["founder", "ceo", "cfo"],
+      "default": ["founder", "ceo", "cfo"]
+    },
+    "proof_bias": ["capital_advisory", "exec_search"]
+  }
+}
