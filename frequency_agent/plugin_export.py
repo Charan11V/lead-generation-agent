@@ -32,6 +32,9 @@ def plugin_rows(leads: list[dict]) -> list[dict]:
                 continue
             first, last = _split_name(name)
             linkedin = p.get("linkedin_url") or ""
+            other = p.get("other_social") or []
+            if isinstance(other, str):
+                other = [other] if other else []
             rows.append(
                 {
                     "First Name": first,
@@ -41,11 +44,11 @@ def plugin_rows(leads: list[dict]) -> list[dict]:
                     "Company": company,
                     "Domain": domain if domain != "unknown" else "",
                     "Website": website if website != "not_found" else "",
-                    "Email": p.get("email") or "",
-                    "Phone": p.get("phone") or "",
+                    "Email": (p.get("email") or "").strip(),
+                    "Phone": (p.get("phone") or "").strip(),
                     "LinkedIn URL": linkedin,
-                    "Twitter/X URL": p.get("twitter_url") or "",
-                    "Other Social": " | ".join(p.get("other_social") or []),
+                    "Twitter/X URL": (p.get("twitter_url") or "").strip(),
+                    "Other Social": " | ".join(other),
                     "Best Channel": p.get("best_channel") or "",
                     "Primary": "yes" if p.get("is_primary") else "no",
                     "Relevance Score": p.get("relevance_score") or "",
@@ -55,6 +58,42 @@ def plugin_rows(leads: list[dict]) -> list[dict]:
                 }
             )
     return rows
+
+
+def _has_social(row: dict) -> bool:
+    if (row.get("LinkedIn URL") or "").strip():
+        return True
+    if (row.get("Twitter/X URL") or "").strip():
+        return True
+    other = (row.get("Other Social") or "").strip().lower()
+    if not other:
+        return False
+    # Instagram or any other social handle/URL
+    return True
+
+
+def enrich_rows(leads: list[dict]) -> list[dict]:
+    """People missing email AND phone, but with LinkedIn / X / other social to approach."""
+    out = []
+    for row in plugin_rows(leads):
+        has_email = bool((row.get("Email") or "").strip())
+        has_phone = bool((row.get("Phone") or "").strip())
+        if has_email or has_phone:
+            continue
+        if _has_social(row):
+            out.append(row)
+    return out
+
+
+def contact_rows(leads: list[dict]) -> list[dict]:
+    """People with a found email and/or phone."""
+    out = []
+    for row in plugin_rows(leads):
+        has_email = bool((row.get("Email") or "").strip())
+        has_phone = bool((row.get("Phone") or "").strip())
+        if has_email or has_phone:
+            out.append(row)
+    return out
 
 
 def apollo_csv_text(leads: list[dict]) -> str:

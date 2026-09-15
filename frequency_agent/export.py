@@ -7,11 +7,19 @@ from pathlib import Path
 
 import pandas as pd
 
+from .branding import brand_name
+
+
+def _columns() -> list[str]:
+    proof = f"{brand_name()} Proof Points"
+    return [proof if c == "Frequency Proof Points" else c for c in COLUMNS]
+
 
 COLUMNS = [
     "Company",
     "Website",
     "Industry",
+    "Result Section",
     "Contact",
     "Contact Role",
     "Email",
@@ -19,6 +27,7 @@ COLUMNS = [
     "LinkedIn URL",
     "Twitter/X URL",
     "Best Channel",
+    "Best Approach Channel",
     "All Contacts (ranked)",
     "ICP Fit",
     "Signal",
@@ -54,11 +63,13 @@ def leads_to_rows(leads: list[dict]) -> list[dict]:
             f", email={c.get('email') or '-'}, li={c.get('linkedin_url') or '-'})"
             for c in all_contacts
         )
+        proof_key = f"{brand_name()} Proof Points"
         rows.append(
             {
                 "Company": lead.get("name"),
                 "Website": lead.get("website"),
                 "Industry": lead.get("industry"),
+                "Result Section": lead.get("result_section") or "",
                 "Contact": contact.get("name"),
                 "Contact Role": contact.get("role"),
                 "Email": contact.get("email") or "",
@@ -66,6 +77,7 @@ def leads_to_rows(leads: list[dict]) -> list[dict]:
                 "LinkedIn URL": contact.get("linkedin_url") or "",
                 "Twitter/X URL": contact.get("twitter_url") or "",
                 "Best Channel": contact.get("best_channel") or "",
+                "Best Approach Channel": lead.get("best_approach_channel") or "",
                 "All Contacts (ranked)": alt_txt,
                 "ICP Fit": score.get("icp_fit"),
                 "Signal": signal.get("summary"),
@@ -74,7 +86,7 @@ def leads_to_rows(leads: list[dict]) -> list[dict]:
                 "Signal Confidence": signal.get("confidence"),
                 "Overall Score": score.get("total"),
                 "Score Reasoning": score.get("why"),
-                "Frequency Proof Points": proof_txt,
+                proof_key: proof_txt,
                 "Draft Outreach": lead.get("email_draft"),
                 "LinkedIn Note": lead.get("linkedin_note"),
                 "Review Status": lead.get("review_status"),
@@ -91,6 +103,6 @@ def export_leads(leads: list[dict], directory: str | Path) -> tuple[Path, Path]:
     csv_path = directory / "sample_output.csv"
     json_path = directory / "sample_output.json"
     rows = leads_to_rows(leads)
-    pd.DataFrame(rows, columns=COLUMNS).to_csv(csv_path, index=False)
+    pd.DataFrame(rows, columns=_columns()).to_csv(csv_path, index=False)
     json_path.write_text(json.dumps(leads, indent=2, ensure_ascii=False), encoding="utf-8")
     return csv_path, json_path

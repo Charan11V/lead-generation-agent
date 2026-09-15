@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 from frequency_agent.contacts import (
     _candidate_from_raw,
     contact_search_queries,
+    discover_contacts_for_lead,
     rank_contacts,
     suggested_roles,
 )
-from frequency_agent.schemas import ContactCandidate
+from frequency_agent.schemas import ContactCandidate, EnrichmentExtract, ICP, SearchHit, Signal
 
 
 def test_hiring_signal_prefers_talent_leader_over_random_exec():
@@ -83,3 +86,42 @@ def test_contact_search_queries_include_hiring_and_leadership():
 def test_suggested_roles_for_capital_advisory_funding():
     roles = suggested_roles("capital_advisory", "funding")
     assert "cfo" in roles
+
+
+def test_discover_contacts_empty_extra_extract_falls_back_without_crash():
+    """Retail-style ICPs often find companies but no named execs; extra search then extracts nothing."""
+    search = MagicMock()
+    search.search.return_value = []
+    icp = ICP(
+        raw_text="Retail/luxury chains across India with 50+ store locations",
+        service_line="exec_search",
+        geo="India",
+        sectors=["retail", "luxury"],
+    )
+    signal = Signal(type="expansion", summary="ShopCo opened 20 new stores in India.")
+    hits = [
+        SearchHit(
+            query="retail India expansion",
+            url="https://example.com/shopco",
+            title="ShopCo expands",
+            snippet="ShopCo opened 20 stores.",
+            raw_content="ShopCo opened 20 stores across India this year.",
+        )
+    ]
+    with patch("frequency_agent.contacts.extract_contacts_from_corpus", return_value=[]):
+        contact, ranked, _corpus, verified = discover_contacts_for_lead(
+            llm=MagicMock(),
+            search=search,
+            memory=None,
+            company="ShopCo",
+            domain="shopco.com",
+            icp=icp,
+            signal=signal,
+            enrich_data=EnrichmentExtract(),
+            corpus="ShopCo opened 20 stores across India this year.",
+            hits=hits,
+        )
+    assert contact.name == "not_found"
+    assert ranked
+    assert ranked[0].is_primary is True
+    assert verified == []

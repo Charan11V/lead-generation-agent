@@ -10,12 +10,16 @@ from typing import Annotated, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from .icp import normalize_service_line, service_line_label
+from .approach_channels import best_approach_channel_str, discover_company_approach_channels
+from .branding import brand_domain, brand_name
+from .classify import classify_result_section
 from .contacts import discover_contacts_for_lead
 from .extract import enrich_company, extract_from_hits
-from .fetch import fetch_text
+from .fetch import fetch_many, hydrate_search_hits
 from .llm import LLM, load_json
 from .memory import Memory, icp_fingerprint
-from .outreach import draft_outreach
+from .outreach import attach_person_drafts
 from .proofs import match_proofs
 from .schemas import (
     CompanyLead,
@@ -24,12 +28,16 @@ from .schemas import (
     SearchHit,
     Signal,
     Source,
+    fresh_approach_channels,
+    to_dict,
 )
-from .scoring import score_lead
+from .scoring import meets_criteria, score_lead
 from .search import SearchClient, expand_queries, publisher_from_url
 from .search_export import write_search_csv
 from .util import domain_of, normalize_name, slug_id
 from .interest import explain_interest
+from .logging_utils import log_error, log_event, user_facing_error
+from .parallel import map_parallel, worker_count
 from .verify import verify_signal
 
 
@@ -56,6 +64,7 @@ class AgentState(TypedDict, total=False):
     new_lead_ids: list
     run_started: str
     query_id: str
+    owner_email: str
 
 
 def _llm(state: AgentState) -> LLM:
@@ -66,8 +75,11 @@ def _search(state: AgentState) -> SearchClient:
     return SearchClient(tavily_key=state.get("tavily_key") or "")
 
 
-def _memory() -> Memory:
-    return Memory()
+def _memory(state: AgentState | None = None) -> Memory:
+    email = ""
+    if state:
+        email = (state.get("owner_email") or "").strip()
+    return Memory(owner_email=email or None)
 
 
 def _excludes() -> tuple[set[str], set[str]]:
@@ -80,24 +92,68 @@ def _excludes() -> tuple[set[str], set[str]]:
 def parse_icp(state: AgentState) -> dict:
     from datetime import datetime, timezone
 
-    llm = _llm(state)
-    raw = state["icp_text"].strip()
-    service_line = state.get("service_line") or "exec_search"
-    parsed = llm.parse(
-        [
-            {
-                "role": "system",
-                "content": (
-                    "Parse an ICP into structured fields for Indian GTM research. "
-                    "If a field is not stated, use a conservative default. "
-                    "stages like series_b, series_c. sectors like fintech, saas, gcc. "
-                    "recency_days default 90."
-                ),
-            },
-            {"role": "user", "content": raw},
-        ],
-        ParsedICP,
-    )
+    raw = (state.get("icp_text") or "").strip()
+    if not raw:
+        return {
+            "error": "ICP text is empty. Describe the companies you want before running.",
+            "logs": ["ICP parse aborted: empty brief."],
+        }
+
+    try:
+        llm = _llm(state)
+    except ValueError as exc:
+        return {"error": user_facing_error(exc), "logs": [f"ICP parse aborted: {exc}"]}
+
+    memory = _memory(state)
+    query_id = (state.get("query_id") or "").strip()
+    existing_sl = ""
+    if query_id:
+        session = memory.get_query_session(query_id)
+        existing_sl = ((session or {}).get("service_line") or "").strip()
+
+    try:
+        parsed = llm.parse(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Parse an ICP brief into structured fields for Indian GTM research at "
+                        f"{brand_name()} ({brand_domain()}). "
+                        "Also choose the best service_line for this brief:\n"
+                        "- exec_search: permanent leadership hiring, VP/CXO/founder roles, talent acquisition\n"
+                        "- fractional_cxo: interim or part-time CXO (CFO, CEO, CHRO, etc.)\n"
+                        "- capital_advisory: M&A, structured credit, working capital, growth capital, fundraise support\n"
+                        "Pick the single best fit; if ambiguous, prefer exec_search. "
+                        "If a field is not stated, use a conservative default. "
+                        "stages like series_b, series_c. sectors like fintech, saas, gcc. "
+                        "recency_days default 90."
+                    ),
+                },
+                {"role": "user", "content": raw},
+            ],
+            ParsedICP,
+        )
+    except Exception as exc:
+        reason = log_error(
+            query_id=query_id,
+            node="parse_icp",
+            exc=exc,
+            message="ICP parse failed",
+        )
+        return {
+            "error": user_facing_error(exc),
+            "logs": [f"ICP parse failed: {reason}"],
+        }
+    if existing_sl and existing_sl not in ("", "auto"):
+        service_line = normalize_service_line(existing_sl, raw)
+    else:
+        inferred_sl = getattr(parsed, "service_line", None)
+        if inferred_sl is None and isinstance(parsed, dict):
+            inferred_sl = parsed.get("service_line")
+        service_line = normalize_service_line(inferred_sl, raw)
+        if query_id:
+            memory.update_query_session(query_id, service_line=service_line, icp_text=raw)
+
     icp = ICP(
         raw_text=raw,
         service_line=service_line,  # type: ignore[arg-type]
@@ -111,8 +167,6 @@ def parse_icp(state: AgentState) -> dict:
         notes=parsed.notes,
     )
     fp = icp_fingerprint(service_line, raw)
-    memory = _memory()
-    query_id = (state.get("query_id") or "").strip()
     if query_id:
         seen = memory.seen_for_query(query_id)
         seen_msg = (
@@ -124,6 +178,7 @@ def parse_icp(state: AgentState) -> dict:
         seen_msg = "New query session — no prior companies to exclude for this search."
     return {
         "icp": icp.model_dump(),
+        "service_line": service_line,
         "icp_hash": fp,
         "seen_domains": sorted(seen["domains"]),
         "seen_names": sorted(seen["names"]),
@@ -138,7 +193,8 @@ def parse_icp(state: AgentState) -> dict:
             "skipped_seen": len(seen["lead_ids"]),
         },
         "logs": [
-            f"Parsed ICP for {service_line}: sectors={icp.sectors} stages={icp.stages} geo={icp.geo}",
+            f"Inferred service line: {service_line_label(service_line)} ({service_line}) · "
+            f"sectors={icp.sectors} stages={icp.stages} geo={icp.geo}",
             seen_msg,
         ],
     }
@@ -155,35 +211,69 @@ def expand(state: AgentState) -> dict:
 
 def search_web(state: AgentState) -> dict:
     client = _search(state)
-    hits: list[dict] = []
-    seen_urls = set()
     geo = ((state.get("icp") or {}).get("geo") or "").lower()
     country = "india" if "india" in geo else None
-    for q in state.get("queries") or []:
-        try:
-            found = client.search(q, max_results=5, advanced=True, country=country)
-        except Exception as exc:
-            return {"error": f"Search failed: {exc}", "logs": [f"Search error: {exc}"]}
-        for h in found:
-            if h.url in seen_urls:
-                continue
-            seen_urls.add(h.url)
-            hits.append(h.model_dump())
+    queries = state.get("queries") or []
+    try:
+        found = client.search_many(
+            queries,
+            max_results=5,
+            advanced=True,
+            country=country,
+            max_workers=worker_count("SEARCH_WORKERS", 6),
+        )
+    except Exception as exc:
+        reason = log_error(
+            run_id=state.get("run_id") or "",
+            query_id=state.get("query_id") or "",
+            node="search_web",
+            exc=exc,
+            message="search failed",
+        )
+        return {
+            "error": user_facing_error(exc),
+            "logs": [f"Search error: {reason}"],
+        }
+    hits = [h.model_dump() for h in found]
     funnel = dict(state.get("funnel") or {})
     funnel["hits"] = len(hits)
+    logs = [f"Search via {client.provider}: {len(hits)} unique public URLs (parallel)."]
+    if client.fallback_reason:
+        logs.insert(
+            0,
+            f"Tavily unavailable ({client.fallback_reason}). Using DuckDuckGo instead.",
+        )
+    if not hits:
+        tavily_bit = (
+            f" Tavily failed ({client.fallback_reason})."
+            if client.fallback_reason
+            else ""
+        )
+        return {
+            "hits": hits,
+            "funnel": funnel,
+            "search_provider": client.provider,
+            "error": (
+                "Search returned no public URLs."
+                + tavily_bit
+                + " DuckDuckGo also returned none — wait a minute and retry, or top up Tavily credits."
+            ),
+            "logs": logs,
+        }
     return {
         "hits": hits,
         "funnel": funnel,
         "search_provider": client.provider,
-        "logs": [f"Search via {client.provider}: {len(hits)} unique public URLs."],
+        "logs": logs,
     }
 
 
 def extract_companies(state: AgentState) -> dict:
     llm = _llm(state)
+    memory = _memory(state)
     icp = ICP.model_validate(state["icp"])
     hits = [SearchHit.model_validate(h) for h in (state.get("hits") or [])]
-    # Drop obvious aggregators unless they still name companies — extractor decides relevance
+    hydrate_search_hits(hits, memory)
     extracted = extract_from_hits(llm, icp, hits)
     funnel = dict(state.get("funnel") or {})
     funnel["extracted_mentions"] = len(extracted)
@@ -259,204 +349,329 @@ def cluster_companies(state: AgentState) -> dict:
     }
 
 
+def _enrich_cluster(
+    cluster: dict,
+    *,
+    llm: LLM,
+    client,
+    memory: Memory,
+    icp: ICP,
+    icp_hash: str,
+    seen_domains: set[str],
+    seen_names: set[str],
+    discovery_queries: list,
+    query_id: str,
+    run_id: str,
+) -> tuple[dict | None, int]:
+    """Enrich one company cluster. Returns (payload, skipped_late_count)."""
+    name = cluster["name"]
+    domain = cluster.get("domain") or "unknown"
+    if (domain != "unknown" and domain.lower() in seen_domains) or (
+        normalize_name(name) in seen_names
+    ):
+        return None, 1
+    existing = memory.existing_lead(domain if domain != "unknown" else None, name)
+    if existing and existing.get("do_not_contact"):
+        return None, 0
+
+    query = f'"{name}" {icp.geo} funding OR raised OR appointed OR expansion OR hiring {icp.sectors[0] if icp.sectors else ""}'
+    try:
+        extra_hits = client.search(query, max_results=4, advanced=False)
+    except Exception:
+        extra_hits = []
+
+    mention_hits = []
+    for m in cluster.get("mentions") or []:
+        url = m.get("source_url") or ""
+        if not url:
+            continue
+        mention_hits.append(
+            SearchHit(
+                query="discovery",
+                url=url,
+                title=m.get("name") or "",
+                snippet=m.get("evidence_quote") or m.get("signal_summary") or "",
+                raw_content=m.get("evidence_quote") or "",
+                published_date=m.get("signal_date") or "",
+            )
+        )
+    all_hits = mention_hits + extra_hits
+    if not all_hits:
+        return None, 0
+
+    hydrate_search_hits(all_hits, memory)
+    corpus_parts = [" ".join([h.title, h.snippet, h.raw_content]) for h in all_hits]
+    corpus = "\n".join(corpus_parts)
+
+    try:
+        enrich_data = enrich_company(llm, icp, name, all_hits[:6])
+    except Exception:
+        return None, 0
+
+    website = enrich_data.website or cluster.get("website") or "not_found"
+    if website and website != "not_found":
+        domain = domain_of(website)
+        if domain.lower() in seen_domains:
+            return None, 1
+
+    sources = []
+    for h in all_hits[:4]:
+        sources.append(
+            Source(
+                url=h.url,
+                title=h.title,
+                date=h.published_date or enrich_data.signal_date or "",
+                publisher=publisher_from_url(h.url),
+                snippet=(h.snippet or "")[:400],
+            )
+        )
+    signal = Signal(
+        type=enrich_data.signal_type or "other",
+        summary=enrich_data.signal_summary or "",
+        date=enrich_data.signal_date or "unknown",
+        sources=sources,
+        evidence_quote=enrich_data.evidence_quote or "",
+    )
+    uncertainty = []
+    for field in ("industry", "country", "city", "stage", "website"):
+        val = getattr(enrich_data, field, None)
+        if not val:
+            uncertainty.append(f"{field}=unknown")
+    if enrich_data.inferred_fields:
+        uncertainty.extend([f"inferred:{f}" for f in enrich_data.inferred_fields])
+
+    contact, all_contacts, corpus, verified_contacts = discover_contacts_for_lead(
+        llm=llm,
+        search=client,
+        memory=memory,
+        company=name,
+        domain=domain or "unknown",
+        icp=icp,
+        signal=signal,
+        enrich_data=enrich_data,
+        corpus=corpus,
+        hits=all_hits,
+    )
+
+    person_emails = {
+        (c.email or "").lower()
+        for c in (verified_contacts or all_contacts or [])
+        if getattr(c, "email", None)
+    }
+    if contact.email:
+        person_emails.add(contact.email.lower())
+
+    approach_channels = []
+    if not verified_contacts:
+        approach_channels = fresh_approach_channels(
+            discover_company_approach_channels(
+                corpus,
+                company=name,
+                domain=domain or "unknown",
+                website=website if website else "",
+                hits=all_hits,
+                person_emails=person_emails,
+            )
+        )
+
+    lead = CompanyLead(
+        lead_id=slug_id(domain, name, memory.owner_email or ""),
+        name=name,
+        website=website if website else "not_found",
+        domain=domain or "unknown",
+        industry=enrich_data.industry or cluster.get("industry") or "unknown",
+        country=enrich_data.country or cluster.get("country") or "unknown",
+        city=enrich_data.city or cluster.get("city") or "unknown",
+        funding_stage=enrich_data.stage or cluster.get("stage") or "unknown",
+        funding_amount=enrich_data.funding_amount or "unknown",
+        funding_date=enrich_data.funding_date or "unknown",
+        service_line_fit=icp.service_line,  # type: ignore[arg-type]
+        # Dump nested models so hot-reload duplicate class identities can't fail validation.
+        signal=to_dict(signal) or {},
+        contact=to_dict(contact) or {},
+        contacts=[to_dict(c) or {} for c in (all_contacts or [])],
+        verified_contacts=[to_dict(c) or {} for c in (verified_contacts or [])],
+        approach_channels=[to_dict(c) or {} for c in (approach_channels or [])],
+        best_approach_channel=best_approach_channel_str(approach_channels),
+        field_uncertainty=uncertainty,
+        discovery_queries=discovery_queries,
+    )
+    lead.signal = verify_signal(lead, corpus)
+    if lead.signal.confidence in {"UNVERIFIED", "LOW"} and lead.verified_contacts:
+        lead.verified_contacts = []
+        if not lead.approach_channels:
+            lead.approach_channels = fresh_approach_channels(
+                discover_company_approach_channels(
+                    corpus,
+                    company=name,
+                    domain=domain or "unknown",
+                    website=website if website else "",
+                    hits=all_hits,
+                    person_emails=person_emails,
+                )
+            )
+            lead.best_approach_channel = best_approach_channel_str(lead.approach_channels)
+    lead.score = score_lead(lead, icp.model_dump())
+    lead.result_section = classify_result_section(lead)  # type: ignore[assignment]
+    lead.proofs = match_proofs(lead, icp.model_dump(), k=3)
+    lead.discovery_web_query = cluster.get("discovery_web_query") or ""
+    lead.query_id = query_id or ""
+
+    if lead.signal.usable_in_outreach:
+        lead.why_interested = explain_interest(llm, lead, icp)
+        lead = attach_person_drafts(llm, lead, icp.model_dump())
+        if lead.qa_flags:
+            lead.review_status = "needs_edit"
+    else:
+        lead.why_interested = explain_interest(llm, lead, icp)
+        blocked = (
+            f"[BLOCKED — DO NOT SEND] Unverified or weak signal for {lead.name}. "
+            f"Confidence={lead.signal.confidence}. {lead.signal.inferred_reason}"
+        )
+        lead.email_draft = blocked
+        lead.linkedin_note = blocked
+        if lead.verified_contacts:
+            lead.verified_contacts = [
+                c.model_copy(update={"email_draft": blocked, "linkedin_note": blocked})
+                for c in lead.verified_contacts
+            ]
+            lead.contacts = [
+                c.model_copy(update={"email_draft": blocked, "linkedin_note": blocked})
+                for c in (lead.contacts or lead.verified_contacts)
+            ]
+            if not lead.contacts:
+                lead.contacts = list(lead.verified_contacts)
+        elif lead.contacts:
+            lead.contacts = [
+                c.model_copy(update={"email_draft": blocked, "linkedin_note": blocked})
+                for c in lead.contacts
+            ]
+        lead.qa_flags = ["Signal not usable in outreach"]
+        lead.review_status = "needs_edit"
+
+    sig_hash = hashlib.sha256((lead.signal.summary or "").encode()).hexdigest()[:16]
+    payload = lead.model_dump()
+    payload["signal_hash"] = sig_hash
+    payload["icp_hash"] = icp_hash
+    payload["run_id"] = run_id or ""
+    payload["fetch_run_id"] = run_id or ""
+    payload["query_id"] = query_id or ""
+    payload["discovery_web_query"] = cluster.get("discovery_web_query") or ""
+    payload["why_interested"] = lead.why_interested
+    payload["is_new"] = True
+    if existing and existing.get("signal_hash") == sig_hash:
+        payload["review_status"] = existing.get("review_status") or payload["review_status"]
+        payload["field_uncertainty"] = payload.get("field_uncertainty") or []
+        payload["field_uncertainty"].append("duplicate_signal: already in memory")
+    return payload, 0
+
+
 def enrich(state: AgentState) -> dict:
     from pathlib import Path
 
     llm = _llm(state)
     client = _search(state)
-    memory = _memory()
+    memory = _memory(state)
     icp = ICP.model_validate(state["icp"])
     icp_hash = state.get("icp_hash") or icp_fingerprint(icp.service_line, icp.raw_text)
     seen_domains = {d.lower() for d in (state.get("seen_domains") or [])}
     seen_names = set(state.get("seen_names") or [])
     clusters = state.get("extracted") or []
-    # Cap enrichment so the prototype stays inside the assignment time/cost box
-    clusters = clusters[: int(os.getenv("MAX_DISCOVER", "22"))]
+    # Cost/time control only — not quality ranking. Default 40.
+    clusters = clusters[: int(os.getenv("MAX_DISCOVER", "40"))]
+    discovery_queries = state.get("queries") or []
+    query_id = state.get("query_id") or ""
+    run_id = state.get("run_id") or "run"
+
+    def _work(cluster: dict) -> tuple[dict | None, int]:
+        company = (cluster.get("name") or "?").strip() or "?"
+        try:
+            return _enrich_cluster(
+                cluster,
+                llm=llm,
+                client=client,
+                memory=memory,
+                icp=icp,
+                icp_hash=icp_hash,
+                seen_domains=seen_domains,
+                seen_names=seen_names,
+                discovery_queries=discovery_queries,
+                query_id=query_id,
+                run_id=run_id,
+            )
+        except Exception as exc:
+            reason = log_error(
+                run_id=run_id,
+                query_id=query_id,
+                node="enrich",
+                company=company,
+                exc=exc,
+                message="per-cluster enrich failed",
+            )
+            # Sentinel payload — filtered below so one bad company never kills the run.
+            return {"__enrich_error__": True, "company": company, "reason": reason}, 0
+
+    enrich_workers = worker_count("ENRICH_WORKERS", 5)
+    raw_results = map_parallel(
+        clusters,
+        _work,
+        max_workers=enrich_workers,
+        env_name="ENRICH_WORKERS",
+        default_workers=5,
+        return_exceptions=True,
+    )
     leads: list[dict] = []
     skipped_late = 0
-    for cluster in clusters:
-        name = cluster["name"]
-        domain = cluster.get("domain") or "unknown"
-        if (domain != "unknown" and domain.lower() in seen_domains) or (
-            normalize_name(name) in seen_names
-        ):
-            skipped_late += 1
-            continue
-        existing = memory.existing_lead(domain if domain != "unknown" else None, name)
-        if existing and existing.get("do_not_contact"):
-            continue
-
-        query = f'"{name}" {icp.geo} funding OR raised OR appointed OR expansion OR hiring {icp.sectors[0] if icp.sectors else ""}'
-        try:
-            extra_hits = client.search(query, max_results=4, advanced=False)
-        except Exception:
-            extra_hits = []
-
-        # Attach original mentions as synthetic hits
-        mention_hits = []
-        for m in cluster.get("mentions") or []:
-            url = m.get("source_url") or ""
-            if not url:
-                continue
-            mention_hits.append(
-                SearchHit(
-                    query="discovery",
-                    url=url,
-                    title=m.get("name") or "",
-                    snippet=m.get("evidence_quote") or m.get("signal_summary") or "",
-                    raw_content=m.get("evidence_quote") or "",
-                    published_date=m.get("signal_date") or "",
-                )
+    enrich_errors: list[str] = []
+    for item in raw_results:
+        if isinstance(item, BaseException):
+            reason = log_error(
+                run_id=run_id,
+                query_id=query_id,
+                node="enrich",
+                exc=item,
+                message="parallel enrich worker crashed",
             )
-        all_hits = mention_hits + extra_hits
-        if not all_hits:
+            enrich_errors.append(reason)
             continue
-        # Fetch pages missing raw content
-        corpus_parts = []
-        for h in all_hits:
-            if not h.raw_content:
-                title, text = fetch_text(h.url, memory)
-                if text:
-                    h.raw_content = text
-                    if title:
-                        h.title = h.title or title
-            corpus_parts.append(" ".join([h.title, h.snippet, h.raw_content]))
-        corpus = "\n".join(corpus_parts)
-
-        try:
-            enrich_data = enrich_company(llm, icp, name, all_hits[:6])
-        except Exception:
+        payload, skip = item
+        skipped_late += skip
+        if not payload:
             continue
-
-        website = enrich_data.website or cluster.get("website") or "not_found"
-        if website and website != "not_found":
-            domain = domain_of(website)
-            # Domain may resolve after enrichment — skip if already linked to this query
-            if domain.lower() in seen_domains:
-                skipped_late += 1
-                continue
-
-        sources = []
-        for h in all_hits[:4]:
-            sources.append(
-                Source(
-                    url=h.url,
-                    title=h.title,
-                    date=h.published_date or enrich_data.signal_date or "",
-                    publisher=publisher_from_url(h.url),
-                    snippet=(h.snippet or "")[:400],
-                )
+        if payload.get("__enrich_error__"):
+            enrich_errors.append(
+                f"{payload.get('company') or '?'}: {payload.get('reason') or 'enrich failed'}"
             )
-        signal = Signal(
-            type=enrich_data.signal_type or "other",
-            summary=enrich_data.signal_summary or "",
-            date=enrich_data.signal_date or "unknown",
-            sources=sources,
-            evidence_quote=enrich_data.evidence_quote or "",
-        )
-        uncertainty = []
-        for field in ("industry", "country", "city", "stage", "website"):
-            val = getattr(enrich_data, field, None)
-            if not val:
-                uncertainty.append(f"{field}=unknown")
-        if enrich_data.inferred_fields:
-            uncertainty.extend([f"inferred:{f}" for f in enrich_data.inferred_fields])
-
-        contact, all_contacts, corpus = discover_contacts_for_lead(
-            llm=llm,
-            search=client,
-            memory=memory,
-            company=name,
-            domain=domain or "unknown",
-            icp=icp,
-            signal=signal,
-            enrich_data=enrich_data,
-            corpus=corpus,
-            hits=all_hits,
-        )
-
-        lead = CompanyLead(
-            lead_id=slug_id(domain, name),
-            name=name,
-            website=website if website else "not_found",
-            domain=domain or "unknown",
-            industry=enrich_data.industry or cluster.get("industry") or "unknown",
-            country=enrich_data.country or cluster.get("country") or "unknown",
-            city=enrich_data.city or cluster.get("city") or "unknown",
-            funding_stage=enrich_data.stage or cluster.get("stage") or "unknown",
-            funding_amount=enrich_data.funding_amount or "unknown",
-            funding_date=enrich_data.funding_date or "unknown",
-            service_line_fit=icp.service_line,  # type: ignore[arg-type]
-            signal=signal,
-            contact=contact,
-            contacts=all_contacts,
-            field_uncertainty=uncertainty,
-            discovery_queries=state.get("queries") or [],
-        )
-        lead.signal = verify_signal(lead, corpus)
-        lead.score = score_lead(lead, icp.model_dump())
-        lead.proofs = match_proofs(lead, icp.model_dump(), k=3)
-        lead.why_interested = explain_interest(llm, lead, icp)
-        lead.discovery_web_query = cluster.get("discovery_web_query") or ""
-        lead.query_id = state.get("query_id") or ""
-        if lead.signal.usable_in_outreach:
-            email, linkedin, flags = draft_outreach(llm, lead, icp.model_dump())
-            lead.email_draft = email
-            lead.linkedin_note = linkedin
-            lead.qa_flags = flags
-            if flags:
-                lead.review_status = "needs_edit"
-        else:
-            lead.email_draft = (
-                f"[BLOCKED — DO NOT SEND] Unverified or weak signal for {lead.name}. "
-                f"Confidence={lead.signal.confidence}. {lead.signal.inferred_reason}"
-            )
-            lead.linkedin_note = lead.email_draft
-            lead.qa_flags = ["Signal not usable in outreach"]
-            lead.review_status = "needs_edit"
-
-        sig_hash = hashlib.sha256((lead.signal.summary or "").encode()).hexdigest()[:16]
-        payload = lead.model_dump()
-        payload["signal_hash"] = sig_hash
-        payload["icp_hash"] = icp_hash
-        payload["run_id"] = state.get("run_id") or ""
-        payload["fetch_run_id"] = state.get("run_id") or ""
-        payload["query_id"] = state.get("query_id") or ""
-        payload["discovery_web_query"] = cluster.get("discovery_web_query") or ""
-        payload["why_interested"] = lead.why_interested
-        payload["is_new"] = True
-        if existing and existing.get("signal_hash") == sig_hash:
-            payload["review_status"] = existing.get("review_status") or payload["review_status"]
-            payload["field_uncertainty"] = payload.get("field_uncertainty") or []
-            payload["field_uncertainty"].append("duplicate_signal: already in memory")
+            continue
         leads.append(payload)
 
-    leads.sort(key=lambda x: (x.get("score") or {}).get("total") or 0, reverse=True)
-    max_queue = int(os.getenv("MAX_QUEUE", "15"))
-    queued = []
+    # Optional safety valve; default 0 = unlimited (return every criteria match)
+    max_queue = int(os.getenv("MAX_QUEUE", "0") or "0")
+
+    matched: list[dict] = []
     for lead in leads:
-        usable = (lead.get("signal") or {}).get("usable_in_outreach")
-        if usable and len(queued) < max_queue:
-            queued.append(lead)
-    if len(queued) < 10:
-        for lead in leads:
-            if lead in queued:
-                continue
-            queued.append(lead)
-            if len(queued) >= min(max_queue, 12):
-                break
+        if meets_criteria(lead):
+            matched.append(lead)
+
+    matched.sort(key=lambda x: (x.get("score") or {}).get("total") or 0, reverse=True)
+    if max_queue > 0:
+        matched = matched[:max_queue]
 
     funnel = dict(state.get("funnel") or {})
-    funnel["verified"] = sum(1 for l in leads if (l.get("signal") or {}).get("usable_in_outreach"))
-    funnel["queued"] = len(queued)
+    funnel["verified"] = sum(1 for l in matched if (l.get("signal") or {}).get("usable_in_outreach"))
+    funnel["queued"] = len(matched)
+    funnel["returned"] = len(matched)
+    funnel["matched"] = len(matched)
     funnel["researched"] = len(leads)
+    funnel["enrich_errors"] = len(enrich_errors)
+    funnel["with_people"] = sum(1 for l in matched if l.get("result_section") == "verified_people")
+    funnel["channel_only"] = sum(1 for l in matched if l.get("result_section") == "approach_channels")
+    funnel["unresolved"] = sum(1 for l in matched if l.get("result_section") == "unresolved")
     funnel["skipped_late"] = skipped_late
     skipped_total = int(funnel.get("skipped_this_run") or 0) + skipped_late
 
-    run_id = state.get("run_id") or "run"
-    query_id = state.get("query_id") or ""
-    new_ids = [l["lead_id"] for l in queued]
-    for lead in queued:
+    new_ids = [l["lead_id"] for l in matched]
+    for lead in matched:
         memory.upsert_lead(lead, icp_hash=icp_hash)
         if query_id:
             memory.link_lead_to_query(
@@ -468,10 +683,9 @@ def enrich(state: AgentState) -> dict:
     if query_id:
         memory.touch_query_session(query_id)
 
-    # Per-search CSV with every contact channel
     root = Path(__file__).resolve().parent.parent
     csv_path = write_search_csv(
-        queued,
+        matched,
         root / "output" / "searches",
         run_id=run_id,
         service_line=icp.service_line,
@@ -479,9 +693,32 @@ def enrich(state: AgentState) -> dict:
         new_lead_ids=set(new_ids),
     )
 
-    all_logs = list(state.get("logs") or []) + [
-        f"Enriched {len(leads)} new companies; {funnel['verified']} usable signals; queued {len(queued)}; "
-        f"skipped {skipped_total} already linked to this query.",
+    err_log = []
+    if enrich_errors:
+        err_log.append(
+            f"Enrich skipped {len(enrich_errors)} compan"
+            f"{'y' if len(enrich_errors) == 1 else 'ies'} due to errors "
+            f"(partial results kept)."
+        )
+        for line in enrich_errors[:8]:
+            err_log.append(f"  · {line}")
+        log_event(
+            "enrich_partial_failures",
+            run_id=run_id,
+            query_id=query_id,
+            node="enrich",
+            message=f"{len(enrich_errors)} cluster failures",
+            count=len(enrich_errors),
+        )
+
+    summary = (
+        f"Enriched {len(leads)} new companies; {funnel['verified']} usable signals; "
+        f"returned {len(matched)} matching "
+        f"({funnel['with_people']} verified people, {funnel['channel_only']} approach channels); "
+        f"skipped {skipped_total} already linked to this query (parallel enrich x{enrich_workers})."
+    )
+    all_logs = list(state.get("logs") or []) + err_log + [
+        summary,
         f"Search CSV saved: {csv_path.name}",
     ]
     memory.save_run(
@@ -500,13 +737,16 @@ def enrich(state: AgentState) -> dict:
     )
 
     return {
-        "leads": queued,
+        "leads": matched,
         "funnel": funnel,
         "csv_path": str(csv_path),
         "skipped_seen": skipped_total,
         "new_lead_ids": new_ids,
-        "logs": [
-            f"Enriched {len(leads)} new companies; {funnel['verified']} usable signals; queued {len(queued)}; "
+        "logs": err_log
+        + [
+            f"Enriched {len(leads)} new companies; {funnel['verified']} usable signals; "
+            f"returned {len(matched)} matching "
+            f"({funnel['with_people']} verified people, {funnel['channel_only']} approach channels); "
             f"skipped {skipped_total} already linked to this query.",
             f"Search CSV saved: {csv_path.name}",
         ],
@@ -521,10 +761,29 @@ def compile_graph():
     g.add_node("extract_companies", extract_companies)
     g.add_node("cluster", cluster_companies)
     g.add_node("enrich", enrich)
+
+    def _after_parse(state: AgentState) -> str:
+        if state.get("error"):
+            return "halt"
+        return "expand_queries"
+
+    def _after_search(state: AgentState) -> str:
+        if state.get("error") or not (state.get("hits") or []):
+            return "halt"
+        return "extract_companies"
+
     g.add_edge(START, "parse_icp")
-    g.add_edge("parse_icp", "expand_queries")
+    g.add_conditional_edges(
+        "parse_icp",
+        _after_parse,
+        {"halt": END, "expand_queries": "expand_queries"},
+    )
     g.add_edge("expand_queries", "search_web")
-    g.add_edge("search_web", "extract_companies")
+    g.add_conditional_edges(
+        "search_web",
+        _after_search,
+        {"halt": END, "extract_companies": "extract_companies"},
+    )
     g.add_edge("extract_companies", "cluster")
     g.add_edge("cluster", "enrich")
     g.add_edge("enrich", END)
@@ -533,31 +792,72 @@ def compile_graph():
 
 def run_agent(
     icp_text: str,
-    service_line: str,
     openai_key: str,
     tavily_key: str = "",
     query_id: str = "",
     on_update=None,
+    *,
+    service_line: str = "",  # deprecated — inferred from ICP text in parse_icp
+    owner_email: str = "",
 ) -> AgentState:
+    from .search import reset_provider_circuit
+
+    reset_provider_circuit()
     app = compile_graph()
     initial: AgentState = {
         "openai_key": openai_key,
         "tavily_key": tavily_key or "",
-        "service_line": service_line,
         "icp_text": icp_text,
         "query_id": query_id or "",
+        "owner_email": (owner_email or "").strip().lower(),
         "logs": [],
         "leads": [],
         "funnel": {},
     }
+    if service_line:
+        initial["service_line"] = service_line
     state: AgentState = dict(initial)
-    for update in app.stream(initial, stream_mode="updates"):
-        for node, delta in update.items():
-            for key, value in delta.items():
-                if key == "logs":
-                    state["logs"] = (state.get("logs") or []) + (value or [])
-                else:
-                    state[key] = value  # type: ignore[literal-required]
-            if on_update:
-                on_update(node, state)
+    log_event(
+        "agent_start",
+        query_id=query_id or "",
+        node="run_agent",
+        message="research run started",
+    )
+    try:
+        for update in app.stream(initial, stream_mode="updates"):
+            for node, delta in update.items():
+                for key, value in delta.items():
+                    if key == "logs":
+                        state["logs"] = (state.get("logs") or []) + (value or [])
+                    else:
+                        state[key] = value  # type: ignore[literal-required]
+                if on_update:
+                    on_update(node, state)
+                if state.get("error"):
+                    log_event(
+                        "agent_halt",
+                        run_id=state.get("run_id") or "",
+                        query_id=query_id or "",
+                        node=node,
+                        message=str(state.get("error") or ""),
+                    )
+    except Exception as exc:
+        reason = log_error(
+            run_id=state.get("run_id") or "",
+            query_id=query_id or "",
+            node="run_agent",
+            exc=exc,
+            message="top-level agent failure",
+        )
+        state["error"] = user_facing_error(exc)
+        state["logs"] = (state.get("logs") or []) + [f"Agent failed: {reason}"]
+    else:
+        if not state.get("error"):
+            log_event(
+                "agent_complete",
+                run_id=state.get("run_id") or "",
+                query_id=query_id or "",
+                node="run_agent",
+                message=f"returned {len(state.get('leads') or [])} leads",
+            )
     return state

@@ -14,20 +14,18 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def can_enqueue(lead: dict) -> tuple[bool, str]:
+def can_enqueue(lead: dict, *, require_selection: bool = True) -> tuple[bool, str]:
+    """Gate for queueing. Prefer selected messages when require_selection is True."""
+    if require_selection:
+        from .outreach_queue import can_enqueue_company
+
+        return can_enqueue_company(lead)
     status = (lead.get("review_status") or "pending").lower()
     if status == "rejected":
         return False, "Rejected leads cannot enter the send queue."
-    if status not in {"approved", "edited"}:
-        return False, "Approve or save an edit before queuing a send."
-    signal = lead.get("signal") or {}
-    if not signal.get("usable_in_outreach"):
-        return False, f"Signal is {signal.get('confidence') or 'UNVERIFIED'} — not cleared for outreach."
     body = (lead.get("email_draft") or "").strip()
-    if not body or body.startswith(BLOCKED_PREFIX):
-        return False, "Draft is blocked or empty — will not queue."
-    if any("Unsourced number" in f or "inferred contact name" in f.lower() for f in (lead.get("qa_flags") or [])):
-        return False, "QA flagged an unsourced or inferred fact — edit first."
+    if not body:
+        return False, "Draft is empty — will not queue."
     return True, ""
 
 

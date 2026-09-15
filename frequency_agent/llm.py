@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import TypeVar
 
@@ -12,6 +13,39 @@ T = TypeVar("T", bound=BaseModel)
 
 EXTRACT_MODEL_DEFAULT = "gpt-4o-mini"
 DRAFT_MODEL_DEFAULT = "gpt-4o"
+
+_RETRYABLE_HINTS = (
+    "rate limit",
+    "timeout",
+    "timed out",
+    "connection",
+    "temporarily unavailable",
+    "503",
+    "429",
+    "overloaded",
+)
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    if any(h in name for h in ("timeout", "ratelimit", "apiconnection", "internalserver")):
+        return True
+    return any(h in text for h in _RETRYABLE_HINTS)
+
+
+def _with_light_retry(fn, *, attempts: int = 3, base_delay: float = 0.6):
+    last: BaseException | None = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as exc:
+            last = exc
+            if i >= attempts - 1 or not _is_retryable(exc):
+                raise
+            time.sleep(base_delay * (2**i))
+    assert last is not None
+    raise last
 
 
 class LLM:
@@ -44,10 +78,12 @@ class LLM:
             parsers.append(self.client.beta.chat.completions.parse)
         for parser in parsers:
             try:
-                result = parser(
-                    model=chosen,
-                    messages=messages,
-                    response_format=response_format,
+                result = _with_light_retry(
+                    lambda p=parser: p(
+                        model=chosen,
+                        messages=messages,
+                        response_format=response_format,
+                    )
                 )
                 parsed = result.choices[0].message.parsed
                 if parsed is None:
@@ -65,11 +101,13 @@ class LLM:
             }
         ]
         try:
-            raw = self.client.chat.completions.create(
-                model=chosen,
-                messages=fallback_messages,
-                temperature=temperature,
-                response_format={"type": "json_object"},
+            raw = _with_light_retry(
+                lambda: self.client.chat.completions.create(
+                    model=chosen,
+                    messages=fallback_messages,
+                    temperature=temperature,
+                    response_format={"type": "json_object"},
+                )
             )
             content = raw.choices[0].message.content or "{}"
             return response_format.model_validate_json(content)
@@ -84,10 +122,12 @@ class LLM:
         temperature: float = 0.4,
     ) -> str:
         chosen = model or self.draft_model
-        result = self.client.chat.completions.create(
-            model=chosen,
-            messages=messages,
-            temperature=temperature,
+        result = _with_light_retry(
+            lambda: self.client.chat.completions.create(
+                model=chosen,
+                messages=messages,
+                temperature=temperature,
+            )
         )
         return (result.choices[0].message.content or "").strip()
 

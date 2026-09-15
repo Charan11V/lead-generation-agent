@@ -93,6 +93,8 @@ class Contact(BaseModel):
     other_social: list[str] = Field(default_factory=list)
     channels: list[ContactChannel] = Field(default_factory=list)
     best_channel: str = ""
+    email_draft: str = ""
+    linkedin_note: str = ""
 
 
 class ContactCandidate(Contact):
@@ -103,16 +105,103 @@ class ContactCandidate(Contact):
     likelihood_reason: str = ""
     is_primary: bool = False
     apollo_hint: str = ""
+    playbook_role_match: bool = False
+    person_verified: bool = False
+    verification_reason: str = ""
+
+
+_CANDIDATE_ONLY_FIELDS = frozenset(
+    {
+        "relevance_score",
+        "rank",
+        "likelihood_reason",
+        "is_primary",
+        "apollo_hint",
+        "playbook_role_match",
+        "person_verified",
+        "verification_reason",
+    }
+)
+
+
+def to_dict(model: BaseModel | dict | None) -> dict | None:
+    """Serialize a pydantic model (or pass through dict) for cross-reload-safe construction."""
+    if model is None:
+        return None
+    if isinstance(model, dict):
+        return model
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    raise TypeError(f"Expected pydantic model or dict, got {type(model)!r}")
+
+
+def fresh_channels(channels: list[ContactChannel] | None) -> list[ContactChannel]:
+    """Re-validate channel models (avoids duplicate class identities after hot reload)."""
+    out: list[ContactChannel] = []
+    for ch in channels or []:
+        if isinstance(ch, dict):
+            out.append(ContactChannel.model_validate(ch))
+        else:
+            out.append(ContactChannel.model_validate(ch.model_dump()))
+    return out
+
+
+def fresh_contact(candidate: ContactCandidate | Contact) -> Contact:
+    data = candidate.model_dump()
+    for key in _CANDIDATE_ONLY_FIELDS:
+        data.pop(key, None)
+    return Contact.model_validate(data)
+
+
+def fresh_contact_candidate(candidate: ContactCandidate) -> ContactCandidate:
+    return ContactCandidate.model_validate(candidate.model_dump())
+
+
+def fresh_signal(signal: Signal | dict | None) -> Signal:
+    """Re-validate Signal (avoids duplicate class identities after hot reload)."""
+    if signal is None:
+        return Signal()
+    if isinstance(signal, dict):
+        return Signal.model_validate(signal)
+    return Signal.model_validate(signal.model_dump())
 
 
 class ScoreBreakdown(BaseModel):
-    icp_fit: int = 0
-    signal_strength: int = 0
-    recency: int = 0
+    """Verification-Weighted Fit Score (0–100). LLM never picks the number."""
+
+    icp_fit: int = 0  # max 30
+    signal_strength: int = 0  # max 25
+    recency: int = 0  # max 15
+    approach_quality: int = 0  # max 20
+    evidence_depth: int = 0  # max 10
+    # Backward-compatible alias of approach_quality for exports / older UI
     contact_relevance: int = 0
     total: int = 0
+    capped_for_weak_signal: bool = False
     reasons: list[str] = Field(default_factory=list)
     why: str = ""
+
+
+class ApproachChannel(BaseModel):
+    """Company-level reachability when a verified person was not found."""
+
+    kind: Literal["email", "phone", "url", "other"] = "other"
+    value: str
+    source_url: str = ""
+    confidence: Confidence = "MEDIUM"
+    label: str = ""
+    priority: int = 0
+
+
+def fresh_approach_channels(channels: list | None) -> list[ApproachChannel]:
+    """Re-validate approach channels (avoids duplicate class identities after hot reload)."""
+    out: list[ApproachChannel] = []
+    for ch in channels or []:
+        if isinstance(ch, dict):
+            out.append(ApproachChannel.model_validate(ch))
+        else:
+            out.append(ApproachChannel.model_validate(ch.model_dump()))
+    return out
 
 
 class ProofMatch(BaseModel):
@@ -121,6 +210,11 @@ class ProofMatch(BaseModel):
     roles_placed: list[str] = Field(default_factory=list)
     outcome: str = ""
     why_matched: str = ""
+    match_tier: Literal["direct", "related"] = "direct"
+    usage_hint: str = ""
+
+
+ResultSection = Literal["verified_people", "approach_channels", "unresolved"]
 
 
 class CompanyLead(BaseModel):
@@ -153,6 +247,10 @@ class CompanyLead(BaseModel):
     why_interested: str = ""
     fetch_run_id: str = ""
     linked_at: str = ""
+    approach_channels: list[ApproachChannel] = Field(default_factory=list)
+    best_approach_channel: str = ""
+    result_section: ResultSection = "unresolved"
+    verified_contacts: list[ContactCandidate] = Field(default_factory=list)
 
 
 class ExtractedOrg(BaseModel):
@@ -177,6 +275,7 @@ class ExtractBatch(BaseModel):
 
 
 class ParsedICP(BaseModel):
+    service_line: ServiceLine = "exec_search"
     geo: str = "India"
     cities: list[str] = Field(default_factory=list)
     sectors: list[str] = Field(default_factory=list)
@@ -226,3 +325,15 @@ class ExtractedContact(BaseModel):
 
 class ContactExtractBatch(BaseModel):
     contacts: list[ExtractedContact] = Field(default_factory=list)
+
+
+class ChannelClaim(BaseModel):
+    person: str
+    kind: str
+    value: str
+    belongs: bool
+    reason: str = ""
+
+
+class ChannelConfirmBatch(BaseModel):
+    claims: list[ChannelClaim] = Field(default_factory=list)

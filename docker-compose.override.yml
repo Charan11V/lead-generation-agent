@@ -1,0 +1,51 @@
+# Auto-loaded for local work only (not used with -f docker-compose.prod.yml).
+
+
+
+services:
+
+  agent:
+
+    environment:
+
+      STREAMLIT_WATCHER: poll
+
+      STREAMLIT_RUN_ON_SAVE: "true"
+
+      # Localhost-only extra admins (ignored on agent-internal.frequency.cx).
+
+      FREQUENCY_LOCAL_ADMINS: "true"
+
+    ports:
+
+      - "8501:8501"
+
+    volumes:
+
+      - .:/app
+
+      - agent-venv-mask:/app/.venv
+
+      # Host folders for Workspace "Browse folder" (Windows Docker Desktop)
+
+      - ${USERPROFILE}/Documents:/host/Documents
+
+      - ${USERPROFILE}/Downloads:/host/Downloads
+
+      - ${USERPROFILE}/Desktop:/host/Desktop
+
+    develop:
+
+      watch:
+
+        - action: rebuild
+
+          path: requirements.txt
+
+
+
+volumes:
+
+  agent-venv-mask:
+
+

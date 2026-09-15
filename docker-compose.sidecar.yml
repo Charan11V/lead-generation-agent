@@ -1,0 +1,31 @@
+# Shared-VPS overlay: sit beside another app that already owns :80/:443.
+# Does NOT start Caddy. Publishes Streamlit on host :8501.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.sidecar.yml up -d --build
+#
+# Dating site on this box stays on 80/443. Agent: http://SERVER_IP:8501/
+
+services:
+  agent:
+    environment:
+      STREAMLIT_WATCHER: none
+      STREAMLIT_RUN_ON_SAVE: "false"
+      APP_BRAND: Tovyq
+      APP_BRAND_DOMAIN: tovyq.swameda.com
+      APP_BRAND_URL: https://tovyq.swameda.com
+    restart: always
+    ports:
+      - "8501:8501"
+    volumes:
+      - agent-var:/app/var
+      - agent-output:/app/output
+    mem_limit: 2g
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+volumes:
+  agent-var:
+  agent-output:

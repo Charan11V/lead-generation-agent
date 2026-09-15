@@ -1,10 +1,17 @@
 [theme]
 base = "dark"
-primaryColor = "#00E0C6"
-backgroundColor = "#07090B"
-secondaryBackgroundColor = "#101618"
-textColor = "#E8EEF0"
+# Darker teal so Streamlit's default white button labels stay readable
+primaryColor = "#0E7A96"
+backgroundColor = "#05070A"
+secondaryBackgroundColor = "#0F141C"
+textColor = "#EDF2F7"
 font = "sans serif"
+
+[server]
+headless = true
+enableCORS = false
+enableXsrfProtection = true
+enableWebsocketCompression = false
 
 [client]
 toolbarMode = "minimal"

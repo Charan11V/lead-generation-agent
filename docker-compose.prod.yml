@@ -1,0 +1,56 @@
+# Production overlay for Contabo / VPS.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Optional HTTPS: set FREQUENCY_DOMAIN=app.yourdomain.com in .env (DNS A → this VPS).
+# Without a domain, Caddy serves HTTP on :80 (IP access).
+
+services:
+  agent:
+    environment:
+      STREAMLIT_WATCHER: none
+      STREAMLIT_RUN_ON_SAVE: "false"
+      FREQUENCY_LOCAL_ADMINS: "false"
+    restart: always
+    volumes:
+      - agent-var:/app/var
+      - agent-output:/app/output
+    mem_limit: 6g
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    networks:
+      - frequency
+
+  caddy:
+    image: caddy:2.8-alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      FREQUENCY_DOMAIN: ${FREQUENCY_DOMAIN:-}
+      CADDY_ACME_EMAIL: ${CADDY_ACME_EMAIL:-ops@frequency.cx}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      agent:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - frequency
+
+volumes:
+  agent-var:
+  agent-output:
+  caddy-data:
+  caddy-config:

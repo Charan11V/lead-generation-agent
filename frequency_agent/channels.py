@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from urllib.parse import urlparse, urlunparse
 
-from .schemas import ContactCandidate, ContactChannel, SearchHit
+from .schemas import ContactCandidate, ContactChannel, SearchHit, fresh_channels
 
 EMAIL_RE = re.compile(
     r"(?<![A-Za-z0-9._%+-])([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})(?![A-Za-z0-9._%+-])"
@@ -30,7 +30,27 @@ JUNK_EMAIL_DOMAINS = {
     "github.com",
     "gravatar.com",
 }
-JUNK_EMAIL_LOCAL = {"noreply", "no-reply", "donotreply", "privacy", "support", "hello", "info", "careers", "jobs"}
+JUNK_EMAIL_LOCAL = {
+    "noreply",
+    "no-reply",
+    "donotreply",
+    "privacy",
+    "support",
+    "hello",
+    "info",
+    "careers",
+    "jobs",
+    "hr",
+    "team",
+    "admin",
+    "press",
+    "media",
+    "contact",
+    "enquiries",
+    "inquiry",
+    "sales",
+    "marketing",
+}
 
 SOCIAL_PRIORITY = {
     "email": 100,
@@ -84,6 +104,93 @@ def _person_name_tokens(person: str) -> list[str]:
     skip = {"mr", "ms", "mrs", "dr", "sir", "the", "and", "of", "at"}
     tokens = [t.lower() for t in re.split(r"[\W_]+", person or "") if len(t) >= 2]
     return [t for t in tokens if t not in skip]
+
+
+def person_windows(text: str, person: str, window: int = 180) -> str:
+    """Snippets around the person's full name — not the whole company page."""
+    if not text or not person:
+        return ""
+    tokens = _person_name_tokens(person)
+    if not tokens:
+        return ""
+    low = text.lower()
+    spans: list[tuple[int, int]] = []
+    full = " ".join(tokens)
+    start = 0
+    while True:
+        i = low.find(full, start)
+        if i < 0:
+            break
+        spans.append((max(0, i - window), min(len(text), i + len(full) + window)))
+        start = i + len(full)
+    if len(tokens) >= 2:
+        first, last = tokens[0], tokens[-1]
+        f_pat = re.compile(rf"\b{re.escape(first)}\b", re.I)
+        l_pat = re.compile(rf"\b{re.escape(last)}\b", re.I)
+        for fm in f_pat.finditer(text):
+            for lm in l_pat.finditer(text):
+                if abs(fm.start() - lm.start()) <= 48:
+                    lo = min(fm.start(), lm.start())
+                    hi = max(fm.end(), lm.end())
+                    spans.append((max(0, lo - window), min(len(text), hi + window)))
+    if not spans:
+        return ""
+    spans.sort()
+    merged: list[list[int]] = []
+    for a, b in spans:
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return "\n".join(text[a:b] for a, b in merged)
+
+
+def email_belongs_to_person(email: str, person: str, context: str = "") -> bool:
+    """Local-part matches this person. First-name-only emails need last name in the nearby snippet."""
+    email = (email or "").strip().lower()
+    if "@" not in email:
+        return False
+    local, _, _domain = email.partition("@")
+    if local in JUNK_EMAIL_LOCAL:
+        return False
+    tokens = _person_name_tokens(person)
+    if not tokens:
+        return False
+    compact = re.sub(r"[^a-z0-9]", "", local)
+    first = tokens[0]
+    last = tokens[-1]
+    if len(tokens) == 1:
+        return tokens[0] in local and len(tokens[0]) >= 4
+    last_in = last in local or last in compact
+    first_in = first in local or first in compact
+    if last_in and first_in:
+        return True
+    if last_in and len(last) >= 4:
+        return True
+    if (first + last) in compact or (len(first) >= 1 and (first[0] + last) in compact):
+        return True
+    if first_in and context and person_near_value(context, person, email):
+        return True
+    return False
+
+
+def handle_belongs_to_person(url: str, person: str) -> bool:
+    """Profile slug/handle must include last name (and first or initial when present)."""
+    tokens = _person_name_tokens(person)
+    if not url or not tokens:
+        return False
+    path = urlparse(_clean_url(url) or url).path.strip("/").split("/")[-1].lower()
+    slug = re.sub(r"[^a-z0-9]", "", path.replace("-", "").replace("_", ""))
+    first, last = tokens[0], tokens[-1]
+    if len(tokens) == 1:
+        return tokens[0] in slug and len(tokens[0]) >= 4
+    if last not in path and last not in slug:
+        return False
+    if first in path or first in slug:
+        return True
+    if (first + last) in slug or (first[0] + last) in slug:
+        return True
+    return False
 
 
 def linkedin_slug(url: str) -> str:
@@ -200,28 +307,21 @@ def classify_social(url: str) -> str | None:
         return None
 
 
-def _valid_email(email: str, *, company_domain: str = "", person_hint: str = "") -> bool:
+def _valid_email(email: str, *, company_domain: str = "", person_hint: str = "", context: str = "") -> bool:
     email = email.strip().lower()
     if "@" not in email:
         return False
     local, _, domain = email.partition("@")
     if domain in JUNK_EMAIL_DOMAINS:
         return False
-    if local in JUNK_EMAIL_LOCAL and not company_domain:
+    if local in JUNK_EMAIL_LOCAL:
         return False
     if email.endswith((".png", ".jpg", ".gif", ".svg", ".webp", ".css", ".js")):
         return False
-    # Prefer company-domain emails when we know the domain
+    if person_hint:
+        return email_belongs_to_person(email, person_hint, context)
     if company_domain and company_domain != "unknown":
-        if domain == company_domain.lower() or domain.endswith("." + company_domain.lower()):
-            return True
-        # Still allow personal emails if name tokens appear in local part
-        tokens = [t for t in re.split(r"\W+", person_hint.lower()) if len(t) >= 3]
-        if tokens and any(t in local for t in tokens[:2]):
-            return True
-        # Generic info@ without name match is weak — keep only if on company domain (already handled)
-        if local in JUNK_EMAIL_LOCAL:
-            return False
+        return domain == company_domain.lower() or domain.endswith("." + company_domain.lower())
     return True
 
 
@@ -240,6 +340,8 @@ def extract_channels_from_text(
     """Regex-extract emails, phones, and social profile URLs from public text."""
     found: list[ContactChannel] = []
     seen: set[str] = set()
+    scoped = person_windows(text, person_hint) if person_hint else (text or "")
+    work = scoped or (text or "")
 
     def add(kind: str, value: str, conf: str = "MEDIUM") -> None:
         value = value.strip()
@@ -257,38 +359,42 @@ def extract_channels_from_text(
             )
         )
 
-    for m in EMAIL_RE.finditer(text or ""):
+    for m in EMAIL_RE.finditer(work):
         email = m.group(1)
-        if _valid_email(email, company_domain=company_domain, person_hint=person_hint):
+        if _valid_email(email, company_domain=company_domain, person_hint=person_hint, context=work):
             add("email", email.lower(), "HIGH" if company_domain and company_domain in email.lower() else "MEDIUM")
 
-    for m in PHONE_RE.finditer(text or ""):
+    for m in PHONE_RE.finditer(work):
         phone = m.group(0).strip()
-        if _valid_phone(phone):
-            # Normalize lightly
+        if _valid_phone(phone) and (not person_hint or person_near_value(work, person_hint, phone)):
             digits = re.sub(r"\D", "", phone)
             if digits.startswith("91") and len(digits) == 12:
                 phone = f"+91 {digits[2:7]} {digits[7:]}"
             add("phone", phone, "MEDIUM")
 
-    # URLs in text + the page URL itself
-    urls = list(URL_RE.findall(text or ""))
+    urls = list(URL_RE.findall(work))
     if source_url:
         urls.append(source_url)
+    if person_hint and not scoped:
+        urls.extend(URL_RE.findall(text or ""))
+        if source_url:
+            urls.append(source_url)
     for url in urls:
         url = _clean_url(url)
         kind = classify_social(url)
         if not kind:
             continue
-        if kind == "linkedin" and person_hint:
-            blob = " ".join([text or "", source_url or ""])
+        if person_hint and kind in {"linkedin", "twitter", "other"}:
+            if not handle_belongs_to_person(url, person_hint):
+                continue
+        if kind == "linkedin" and person_hint and scoped:
             if not linkedin_matches_person(
                 url,
                 person_hint,
                 company=company_domain,
-                context=blob,
+                context=work,
                 company_domain=company_domain,
-            ):
+            ) and not handle_belongs_to_person(url, person_hint):
                 continue
         if kind == "twitter":
             add("twitter", url, "HIGH")
@@ -329,7 +435,7 @@ def merge_channels(channels: list[ContactChannel]) -> list[ContactChannel]:
         elif prev and ch.confidence == "HIGH" and prev.confidence != "HIGH":
             best[key] = ch
     ordered = sorted(best.values(), key=lambda c: (-c.priority, c.kind, c.value))
-    return ordered
+    return fresh_channels(ordered)
 
 
 def best_channel(channels: list[ContactChannel]) -> ContactChannel | None:
@@ -405,22 +511,25 @@ def apply_channels_to_candidate(
     )
 
 
-def person_near_value(text: str, person: str, value: str, window: int = 280) -> bool:
-    """True if person name and value appear near each other in text."""
+def person_near_value(text: str, person: str, value: str, window: int = 180) -> bool:
+    """True if the full name (first and last) sits near the value. Never first-name-only."""
     if not text or not person or not value:
         return False
     low = text.lower()
-    name = person.lower()
     val = value.lower()
-    ni = low.find(name)
     vi = low.find(val)
-    if ni < 0 or vi < 0:
-        # Try first token of name
-        first = name.split()[0] if name.split() else name
-        ni = low.find(first)
-        if ni < 0 or vi < 0:
-            return False
-    return abs(ni - vi) <= window
+    if vi < 0:
+        return False
+    tokens = _person_name_tokens(person)
+    if not tokens:
+        return False
+    lo, hi = max(0, vi - window), min(len(low), vi + len(val) + window)
+    snippet = low[lo:hi]
+    if " ".join(tokens) in snippet:
+        return True
+    if len(tokens) == 1:
+        return tokens[0] in snippet
+    return tokens[0] in snippet and tokens[-1] in snippet
 
 
 def filter_channels_for_person(
@@ -432,42 +541,169 @@ def filter_channels_for_person(
     company: str = "",
     role: str = "",
 ) -> list[ContactChannel]:
-    """Keep channels that look tied to this person (or company email domain)."""
+    """Keep channels that belong to this person. Empty is better than a mix-up."""
+    scoped = person_windows(corpus, person) or corpus
     kept: list[ContactChannel] = []
     for ch in channels:
         if ch.kind == "email":
-            if company_domain and company_domain != "unknown" and company_domain.lower() in ch.value.lower():
-                tokens = [t for t in re.split(r"\W+", person.lower()) if len(t) >= 3]
-                local = ch.value.split("@")[0]
-                if tokens and any(t in local for t in tokens[:2]):
-                    kept.append(ch)
-                elif person_near_value(corpus, person, ch.value):
-                    kept.append(ch)
-            elif person_near_value(corpus, person, ch.value):
+            if email_belongs_to_person(ch.value, person, scoped):
                 kept.append(ch)
         elif ch.kind == "phone":
-            if person_near_value(corpus, person, ch.value):
+            if person_near_value(scoped, person, ch.value):
                 kept.append(ch)
-        elif ch.kind in {"linkedin", "twitter", "other"}:
-            if ch.kind == "linkedin":
-                ctx = " ".join([corpus or "", ch.value or "", ch.source_url or ""])
-                if not linkedin_matches_person(
-                    ch.value,
-                    person,
-                    company=company or company_domain,
-                    role=role,
-                    context=ctx,
-                    company_domain=company_domain,
-                ):
-                    continue
-                kept.append(ch)
+        elif ch.kind == "linkedin":
+            if not handle_belongs_to_person(ch.value, person):
                 continue
-            path = ch.value.lower()
-            tokens = [t for t in re.split(r"\W+", person.lower()) if len(t) >= 3]
-            if tokens and any(t in path for t in tokens[:2]):
+            ctx = scoped or " ".join([corpus or "", ch.value or "", ch.source_url or ""])
+            if linkedin_matches_person(
+                ch.value,
+                person,
+                company=company or company_domain,
+                role=role,
+                context=ctx,
+                company_domain=company_domain,
+            ) or (handle_belongs_to_person(ch.value, person) and person_near_value(ctx, person, ch.value, window=220)):
                 kept.append(ch)
-            elif person_near_value(corpus, person, ch.value, window=400):
+        elif ch.kind in {"twitter", "other"}:
+            if handle_belongs_to_person(ch.value, person):
                 kept.append(ch)
         else:
             kept.append(ch)
     return merge_channels(kept)
+
+
+def channel_owner_score(person: str, ch: ContactChannel) -> int:
+    tokens = _person_name_tokens(person)
+    if not tokens:
+        return 0
+    first, last = tokens[0], tokens[-1]
+    hay = (ch.value.split("@")[0] if ch.kind == "email" else ch.value).lower()
+    hay = re.sub(r"[^a-z0-9]", "", hay)
+    score = 0
+    if last in hay:
+        score += 4
+    if first in hay:
+        score += 2
+    if (first + last) in hay:
+        score += 3
+    return score
+
+
+def assign_exclusive_channels(candidates: list[ContactCandidate]) -> list[ContactCandidate]:
+    """Each email / profile URL belongs to at most one person."""
+    if len(candidates) <= 1:
+        return candidates
+    claims: dict[str, tuple[int, int, ContactChannel]] = {}
+    for i, cand in enumerate(candidates):
+        for ch in cand.channels or []:
+            key = f"{ch.kind}:{(ch.value or '').lower()}"
+            score = channel_owner_score(cand.name, ch)
+            if score <= 0:
+                continue
+            prev = claims.get(key)
+            if not prev or score > prev[0] or (score == prev[0] and cand.relevance_score > candidates[prev[1]].relevance_score):
+                claims[key] = (score, i, ch)
+    owned: dict[int, list[ContactChannel]] = {i: [] for i in range(len(candidates))}
+    for _score, idx, ch in claims.values():
+        owned[idx].append(ch)
+    out: list[ContactCandidate] = []
+    for i, cand in enumerate(candidates):
+        cleared = cand.model_copy(
+            update={
+                "channels": [],
+                "email": "",
+                "phone": "",
+                "linkedin_url": "",
+                "twitter_url": "",
+                "other_social": [],
+                "best_channel": "",
+            }
+        )
+        out.append(apply_channels_to_candidate(cleared, owned[i]))
+    return out
+
+
+def confirm_channels_with_llm(
+    llm,
+    *,
+    company: str,
+    candidates: list[ContactCandidate],
+    corpus: str,
+) -> list[ContactCandidate]:
+    """One cheap pass: confirm or drop channels we already found. Never invents new ones."""
+    from .schemas import ChannelConfirmBatch
+
+    claims_in: list[dict] = []
+    for cand in candidates:
+        if (cand.name or "").lower() in {"", "not_found", "unknown"}:
+            continue
+        snippet = person_windows(corpus, cand.name)[:500]
+        for ch in cand.channels or []:
+            if ch.kind not in {"email", "linkedin", "twitter", "other"}:
+                continue
+            claims_in.append(
+                {
+                    "person": cand.name,
+                    "role": cand.role,
+                    "kind": ch.kind,
+                    "value": ch.value,
+                    "snippet": snippet,
+                }
+            )
+    if not claims_in:
+        return candidates
+    try:
+        parsed = llm.parse(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "You verify whether public contact channels belong to the named person "
+                        f"at {company}. Do not invent channels. If unsure, belongs=false. "
+                        "A channel belongs only if it is clearly this person (name in email/handle/slug) "
+                        "and not a colleague, journalist, or company inbox."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Confirm each channel. Return belongs true/false for every item:\n"
+                        + "\n".join(
+                            f"- person={c['person']} role={c['role']} kind={c['kind']} value={c['value']}\n  context: {c['snippet'][:280]}"
+                            for c in claims_in
+                        )
+                    ),
+                },
+            ],
+            ChannelConfirmBatch,
+        )
+    except Exception:
+        return candidates
+
+    rejected: set[tuple[str, str]] = set()
+    for claim in parsed.claims or []:
+        ident = f"{claim.kind}:{(claim.value or '').lower()}"
+        if not claim.belongs:
+            rejected.add((claim.person.lower(), ident))
+
+    out: list[ContactCandidate] = []
+    for cand in candidates:
+        keep: list[ContactChannel] = []
+        for ch in cand.channels or []:
+            ident = f"{ch.kind}:{(ch.value or '').lower()}"
+            if (cand.name.lower(), ident) in rejected:
+                continue
+            keep.append(ch)
+        cleared = cand.model_copy(
+            update={
+                "channels": [],
+                "email": "",
+                "phone": "",
+                "linkedin_url": "",
+                "twitter_url": "",
+                "other_social": [],
+                "best_channel": "",
+            }
+        )
+        out.append(apply_channels_to_candidate(cleared, keep))
+    return out

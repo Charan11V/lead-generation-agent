@@ -12,6 +12,7 @@ frequency_agent.db
 *.db
 .DS_Store
 output/runs/
+var/
 
 # Generated exports & run artifacts (may contain lead/contact PII)
 output/*

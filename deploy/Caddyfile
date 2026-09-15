@@ -1,0 +1,22 @@
+# Plain HTTP (IP access) — used when FREQUENCY_DOMAIN is unset.
+{
+	email {$CADDY_ACME_EMAIL:ops@frequency.cx}
+}
+
+:80 {
+	encode gzip zstd
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	reverse_proxy agent:8501 {
+		flush_interval -1
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+}

@@ -118,7 +118,75 @@ def test_channel_search_queries_include_linkedin():
     assert "jane founder" in blob
 
 
-def test_plugin_export_rows():
+def test_channels_do_not_mix_people_on_same_page():
+    text = """
+    Jane Founder, CEO of AcmePay, jane@acmepay.com https://www.linkedin.com/in/jane-founder https://x.com/janefounder
+    Priya Sharma, CHRO, priya.sharma@acmepay.com https://www.linkedin.com/in/priya-sharma https://x.com/priyasharma
+    """
+    jane = extract_channels_from_text(text, company_domain="acmepay.com", person_hint="Jane Founder")
+    priya = extract_channels_from_text(text, company_domain="acmepay.com", person_hint="Priya Sharma")
+    jane_vals = {c.value.lower() for c in jane}
+    priya_vals = {c.value.lower() for c in priya}
+    assert "jane@acmepay.com" in jane_vals
+    assert "priya.sharma@acmepay.com" not in jane_vals
+    assert not any("priya-sharma" in v for v in jane_vals)
+    assert "priya.sharma@acmepay.com" in priya_vals
+    assert "jane@acmepay.com" not in priya_vals
+    assert not any("jane-founder" in v for v in priya_vals)
+    assert not any("janefounder" in v for v in priya_vals)
+
+
+def test_generic_inbox_not_attached_to_person():
+    text = "Jane Founder CEO AcmePay — write to info@acmepay.com or careers@acmepay.com"
+    chans = extract_channels_from_text(text, company_domain="acmepay.com", person_hint="Jane Founder")
+    emails = [c.value for c in chans if c.kind == "email"]
+    assert emails == []
+
+
+def test_exclusive_channels_one_owner():
+    jane = ContactCandidate(name="Jane Founder", role="CEO", relevance_score=40, usable_in_outreach=True)
+    priya = ContactCandidate(name="Priya Sharma", role="CHRO", relevance_score=30, usable_in_outreach=True)
+    shared = ContactChannel(kind="linkedin", value="https://linkedin.com/in/jane-founder", confidence="HIGH", priority=80)
+    jane = apply_channels_to_candidate(jane, [shared, ContactChannel(kind="email", value="jane@acmepay.com", confidence="HIGH", priority=100)])
+    priya = apply_channels_to_candidate(priya, [shared, ContactChannel(kind="email", value="priya.sharma@acmepay.com", confidence="HIGH", priority=100)])
+    from frequency_agent.channels import assign_exclusive_channels
+
+    out = assign_exclusive_channels([jane, priya])
+    assert "jane-founder" in (out[0].linkedin_url or "")
+    assert "jane-founder" not in (out[1].linkedin_url or "")
+    assert out[0].email == "jane@acmepay.com"
+    assert out[1].email == "priya.sharma@acmepay.com"
+
+
+def test_llm_confirm_drops_mismatched_social():
+    from frequency_agent.channels import confirm_channels_with_llm
+    from frequency_agent.schemas import ChannelClaim, ChannelConfirmBatch
+
+    cand = ContactCandidate(
+        name="Jane Founder",
+        role="CEO",
+        usable_in_outreach=True,
+        channels=[
+            ContactChannel(kind="linkedin", value="https://linkedin.com/in/john-smith", confidence="MEDIUM", priority=80),
+            ContactChannel(kind="email", value="jane@acmepay.com", confidence="HIGH", priority=100),
+        ],
+        email="jane@acmepay.com",
+        linkedin_url="https://linkedin.com/in/john-smith",
+    )
+
+    class _Fake:
+        def parse(self, messages, schema, **kwargs):
+            return ChannelConfirmBatch(
+                claims=[
+                    ChannelClaim(person="Jane Founder", kind="linkedin", value="https://linkedin.com/in/john-smith", belongs=False),
+                    ChannelClaim(person="Jane Founder", kind="email", value="jane@acmepay.com", belongs=True),
+                ]
+            )
+
+    out = confirm_channels_with_llm(_Fake(), company="AcmePay", candidates=[cand], corpus="Jane Founder CEO AcmePay")
+    assert out[0].email == "jane@acmepay.com"
+    assert not out[0].linkedin_url
+
     leads = [
         {
             "lead_id": "abc",

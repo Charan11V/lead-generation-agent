@@ -59,37 +59,46 @@ Frequency’s BD is senior-led and precise. The bottleneck is research: who just
 | Search | [Tavily](https://tavily.com) (primary), DuckDuckGo (fallback) |
 | Fetch | httpx, trafilatura, BeautifulSoup |
 | Schemas | Pydantic v2 |
-| Storage | SQLite (`frequency_agent.db`) |
+| Storage | SQLite (`FREQUENCY_DB_PATH` or `frequency_agent.db`) |
 | UI | Streamlit |
 | Tests | pytest (29 tests) |
 
 ---
 
-## Quick start
+## Quick start (Docker)
+
+The agent runs in a Linux container that matches production. Feature work, tests, and deploys all use this image.
 
 ```bash
 cd frequency-lead-agent
+copy .env.example .env          # paste OPENAI_API_KEY and TAVILY_API_KEY
+docker compose up --build
+```
+
+Open `http://localhost:8501`. Source is bind-mounted: save a file and Streamlit reruns inside the container.
+
+| Task | Command |
+|------|---------|
+| App | `docker compose up --build` |
+| Tests | `docker compose exec agent python -m pytest tests -q` |
+| Shell | `docker compose exec agent bash` |
+| CLI run | `docker compose exec agent python run_agent.py --icp "Series B+ fintech in India"` |
+| New dependency | add to `requirements.txt`, then `docker compose up --build --watch` (or rebuild) |
+| Deploy | `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build` |
+
+SQLite lives at `/app/var/frequency_agent.db` (host folder `var/` in local compose). Output CSVs stay in `output/`.
+
+**Without Docker** (venv):
+
+```bash
 python -m venv .venv
 .venv\Scripts\activate          # Windows
 # source .venv/bin/activate     # macOS/Linux
 pip install -r requirements.txt
-copy .env.example .env          # paste OPENAI_API_KEY and TAVILY_API_KEY
+copy .env.example .env
 streamlit run app.py
-```
-
-**CLI** (same pipeline, writes `output/sample_output.csv`):
-
-```bash
-python run_agent.py --service-line exec_search --icp "Series B+ fintech startups in India that raised in the last 90 days"
-```
-
-**Run tests:**
-
-```bash
 python -m pytest tests -q
 ```
-
-Open `http://localhost:8501`. Choose a service line and ICP, click **New query**, wait a few minutes, then review leads in the queue.
 
 ---
 
@@ -162,6 +171,7 @@ START → parse_icp → expand_queries → search_web → extract_companies → 
 ### Node 1: `parse_icp`
 
 - LLM parses free-text ICP → structured `ICP` (geo, cities, sectors, stages, recency_days, buying_signals, …).
+- **Infers `service_line`** (`exec_search`, `fractional_cxo`, or `capital_advisory`) from the brief — no manual picker in the UI.
 - Computes `icp_hash` (metadata fingerprint; not used for global dedup).
 - If `query_id` present: loads `memory.seen_for_query(query_id)` → `seen_domains`, `seen_names`.
 - Creates `run_id`, `run_started`, initial funnel counters.
@@ -466,7 +476,7 @@ Flags set `review_status: needs_edit` when present.
 ## Persistence (SQLite)
 
 **File:** `frequency_agent/memory.py`  
-**Database:** `frequency_agent.db` (project root)
+**Database:** `frequency_agent.db` (project root by default; `FREQUENCY_DB_PATH` in Docker → `/app/var/frequency_agent.db`)
 
 ### Tables
 
@@ -485,7 +495,7 @@ Flags set `review_status: needs_edit` when present.
 
 | Method | Purpose |
 |--------|---------|
-| `create_query_session(icp, service_line)` | New query |
+| `create_query_session(icp)` | New query (service line filled after first parse) |
 | `seen_for_query(query_id)` | Per-query dedup set |
 | `link_lead_to_query(...)` | Attach lead to query |
 | `leads_for_query(query_id)` | All companies for one query |
@@ -501,8 +511,8 @@ Flags set `review_status: needs_edit` when present.
 
 ### Main controls
 
-- **Service line:** `exec_search` | `fractional_cxo` | `capital_advisory`
-- **ICP preset + text area**
+- **What are you looking for?** — single plain-language brief (service line inferred by AI)
+- **Example brief (optional)** — quick-start presets
 - **New query** / **Fetch more**
 
 ### Tabs
@@ -582,6 +592,23 @@ Tavily optional — falls back to DuckDuckGo (lower quality for Indian business 
 |----------|---------|--------|
 | `MAX_DISCOVER` | `22` | Max companies enriched per fetch |
 | `MAX_QUEUE` | `15` | Max leads returned to UI queue |
+| `SEARCH_WORKERS` | `6` | Parallel Tavily/DDG queries |
+| `FETCH_WORKERS` | `10` | Parallel page fetches |
+| `LLM_WORKERS` | `4` | Parallel extract batches |
+| `ENRICH_WORKERS` | `5` | Parallel company enrichment |
+| `CONTACT_WORKERS` | `4` | Parallel per-person channel lookup |
+
+### Performance
+
+The pipeline parallelizes I/O-bound work without changing scoring, verification, or contact policy:
+
+- **Search** — all 10 discovery queries run concurrently
+- **Fetch** — page cache + pooled HTTP per thread; batch prefetch before extract/enrich
+- **Extract** — LLM company/contact batches in parallel
+- **Enrich** — multiple companies enriched at once; interest brief + outreach draft run concurrently per lead
+- **Contacts** — top candidates channel-searched in parallel; early exit when email + LinkedIn found
+
+Typical speedup: **2–4×** on a full run vs the serial pipeline (depends on API latency and `ENRICH_WORKERS`).
 
 ### LLM models (`llm.py`)
 
@@ -626,8 +653,13 @@ frequency-lead-agent/
 ├── app.py                      # Streamlit UI
 ├── run_agent.py                # CLI runner
 ├── requirements.txt
+├── Dockerfile                  # Production Linux image (Python 3.11)
+├── docker-compose.yml          # Shared service
+├── docker-compose.override.yml # Local: bind-mount source + live reload
+├── docker-compose.prod.yml     # Deploy: named volumes, no source mount
+├── docker-entrypoint.py
 ├── .env.example
-├── frequency_agent.db          # SQLite (created at runtime)
+├── var/frequency_agent.db      # SQLite in Docker (created at runtime)
 ├── frequency_agent/
 │   ├── graph.py                # LangGraph 6-node pipeline
 │   ├── memory.py               # SQLite + query sessions

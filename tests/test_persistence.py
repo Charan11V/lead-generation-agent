@@ -130,6 +130,8 @@ def test_load_run_restores_leads():
         assert loaded["queries"] == ["q1"]
         latest = mem.latest_run()
         assert latest and latest["run_id"] == "run2"
+        assert len(mem.leads_for_run("run2")) == 1
+        assert mem.leads_for_run("run2")[0]["name"] == "Workday"
 
 
 def test_search_csv_includes_channels():
@@ -137,21 +139,40 @@ def test_search_csv_includes_channels():
         {
             "lead_id": "L1",
             "name": "AcmePay",
+            "owner_email": "ops@example.com",
             "website": "https://acmepay.com",
             "domain": "acmepay.com",
             "industry": "fintech",
             "city": "Bengaluru",
             "country": "India",
             "funding_stage": "series_b",
+            "funding_amount": "$20M",
+            "funding_date": "2026-01-01",
+            "query_id": "q1",
+            "service_line_fit": "exec_search",
+            "discovery_web_query": '"AcmePay" funding India',
+            "why_interested": "Recent raise implies leadership build",
             "signal": {
                 "type": "funding",
                 "summary": "Raised Series B",
                 "date": "2026-01-01",
                 "confidence": "HIGH",
+                "evidence_quote": "AcmePay raised $20M",
                 "sources": [{"url": "https://news.example/a"}],
             },
-            "score": {"total": 88, "why": "strong"},
-            "contacts": [
+            "score": {
+                "total": 88,
+                "why": "strong",
+                "icp_fit": 22,
+                "signal_strength": 24,
+                "recency": 18,
+                "contact_relevance": 24,
+            },
+            "email_draft": "Hi Jane — company draft",
+            "linkedin_note": "Hi Jane on LI",
+            "qa_flags": [],
+            "field_uncertainty": [],
+            "verified_contacts": [
                 {
                     "name": "Jane Founder",
                     "role": "CEO",
@@ -164,8 +185,44 @@ def test_search_csv_includes_channels():
                     "source_url": "https://acmepay.com/about",
                     "is_primary": True,
                     "rank": 1,
+                    "person_verified": True,
+                    "email_draft": "Hi Jane — person draft with proofs",
+                    "linkedin_note": "Jane LI note",
                     "apollo_hint": "Open LinkedIn",
+                    "usable_in_outreach": True,
+                    "confidence": "HIGH",
+                    "why": "Named CEO in press",
+                    "relevance_score": 40,
+                    "likelihood_reason": "Role fits",
+                    "channels": [
+                        {
+                            "kind": "email",
+                            "value": "jane@acmepay.com",
+                            "confidence": "HIGH",
+                            "source_url": "https://acmepay.com/about",
+                            "priority": 100,
+                        }
+                    ],
                 }
+            ],
+            "contacts": [
+                {
+                    "name": "Jane Founder",
+                    "role": "CEO",
+                    "email": "jane@acmepay.com",
+                    "phone": "+91 98765 43210",
+                    "linkedin_url": "https://linkedin.com/in/jane",
+                    "is_primary": True,
+                    "rank": 1,
+                },
+                {
+                    "name": "Raj COO",
+                    "role": "COO",
+                    "email": "raj@acmepay.com",
+                    "rank": 2,
+                    "email_draft": "Hi Raj",
+                    "linkedin_note": "Raj note",
+                },
             ],
             "proofs": [{"company": "Savart", "outcome": "scaled"}],
             "review_status": "pending",
@@ -173,13 +230,38 @@ def test_search_csv_includes_channels():
         }
     ]
     rows = search_contact_rows(leads, run_id="abc", new_lead_ids={"L1"})
-    assert len(rows) == 1
-    assert rows[0]["Email"] == "jane@acmepay.com"
-    assert "linkedin.com/in/jane" in rows[0]["LinkedIn URL"]
-    assert rows[0]["Is New This Run"] == "yes"
+    assert len(rows) == 2
+    jane = next(r for r in rows if r["Full Name"] == "Jane Founder")
+    raj = next(r for r in rows if r["Full Name"] == "Raj COO")
+    assert jane["Owner Email"] == "ops@example.com"
+    assert jane["Email"] == "jane@acmepay.com"
+    assert jane["Phone"] == "+91 98765 43210"
+    assert "linkedin.com/in/jane" in jane["LinkedIn URL"]
+    assert jane["Is New This Run"] == "yes"
+    assert jane["All Channels"] == "email:jane@acmepay.com (HIGH) [https://acmepay.com/about]"
+    assert jane["Why Interested"] == "Recent raise implies leadership build"
+    assert jane["Discovery Web Query"] == '"AcmePay" funding India'
+    assert jane["Person Email Draft"] == "Hi Jane — person draft with proofs"
+    assert jane["Company Email Draft"] == "Hi Jane — company draft"
+    assert jane["Person LinkedIn Note"] == "Jane LI note"
+    assert raj["Person Email Draft"] == "Hi Raj"
+    assert raj["Draft Email"] == "Hi Jane — company draft"
     text = search_csv_text(leads, run_id="abc", new_lead_ids={"L1"})
+    assert "Owner Email" in text
+    assert "Person Email Draft" in text
     assert "jane@acmepay.com" in text
+    assert "Hi Jane — person draft with proofs" in text
+    assert "Hi Raj" in text
     assert "LinkedIn URL" in text
+
+    from frequency_agent.search_export import full_results_json_text
+    import json
+
+    payload = json.loads(full_results_json_text(leads, run_id="abc"))
+    assert payload["company_count"] == 1
+    assert payload["contact_row_count"] == 2
+    assert payload["leads"][0]["email_draft"].startswith("Hi Jane")
+    assert len(payload["leads"][0]["verified_contacts"]) == 1
 
     with tempfile.TemporaryDirectory() as tmp:
         path = write_search_csv(

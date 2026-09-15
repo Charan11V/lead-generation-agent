@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 
+from .branding import brand_name
 from .llm import LLM
 from .schemas import ContactExtractBatch, EnrichmentExtract, ExtractBatch, ExtractedOrg, ICP, SearchHit
 
 
-EXTRACT_SYSTEM = """You extract REAL companies from public search results for a GTM researcher.
+def _extract_system() -> str:
+    return f"""You extract REAL companies from public search results for a GTM researcher.
 Rules:
 - Only extract companies clearly named in the text.
 - Do not invent funding amounts, dates, cities, or websites.
@@ -16,7 +18,7 @@ Rules:
 - evidence_quote must be a short span copied from the source.
 - is_relevant_to_icp should be true only if the company plausibly matches the ICP.
 - Ignore listicle fluff like 'top 10 startups' unless a specific company+signal is named.
-- Ignore Frequency's own clients if mentioned as case studies.
+- Ignore {brand_name()}'s own clients if mentioned as case studies.
 - source_url MUST be copied from the result's url field.
 """
 
@@ -40,9 +42,11 @@ Rules:
 
 
 def extract_from_hits(llm: LLM, icp: ICP, hits: list[SearchHit], chunk: int = 4) -> list[ExtractedOrg]:
-    found: list[ExtractedOrg] = []
-    for i in range(0, len(hits), chunk):
-        batch = hits[i : i + chunk]
+    if not hits:
+        return []
+
+    def _process_batch(batch: list[SearchHit]) -> list[ExtractedOrg]:
+        batch_found: list[ExtractedOrg] = []
         payload = []
         for h in batch:
             body = (h.raw_content or h.snippet or "")[:4000]
@@ -56,7 +60,7 @@ def extract_from_hits(llm: LLM, icp: ICP, hits: list[SearchHit], chunk: int = 4)
             )
         parsed = llm.parse(
             [
-                {"role": "system", "content": EXTRACT_SYSTEM},
+                {"role": "system", "content": _extract_system()},
                 {
                     "role": "user",
                     "content": (
@@ -79,7 +83,22 @@ def extract_from_hits(llm: LLM, icp: ICP, hits: list[SearchHit], chunk: int = 4)
                     break
             if not org.discovery_web_query and batch:
                 org.discovery_web_query = batch[0].query
-            found.append(org)
+            batch_found.append(org)
+        return batch_found
+
+    batches = [hits[i : i + chunk] for i in range(0, len(hits), chunk)]
+    from .parallel import map_parallel, worker_count
+
+    parts = map_parallel(
+        batches,
+        _process_batch,
+        max_workers=worker_count("LLM_WORKERS", 4),
+        env_name="LLM_WORKERS",
+        default_workers=4,
+    )
+    found: list[ExtractedOrg] = []
+    for part in parts:
+        found.extend(part)
     return found
 
 
@@ -130,8 +149,9 @@ def extract_contacts_from_corpus(
     found: list[ExtractedContact] = []
     if not hits:
         return found
-    for i in range(0, len(hits), chunk):
-        batch = hits[i : i + chunk]
+
+    def _process_batch(batch: list[SearchHit]) -> list[ExtractedContact]:
+        batch_found: list[ExtractedContact] = []
         payload = []
         for h in batch:
             body = (h.raw_content or h.snippet or "")[:4000]
@@ -160,11 +180,25 @@ def extract_contacts_from_corpus(
                 ContactExtractBatch,
             )
         except Exception:
-            continue
+            return batch_found
         for person in parsed.contacts:
             if not person.name or len(person.name.strip()) < 2:
                 continue
             if not person.source_url and batch:
                 person = person.model_copy(update={"source_url": batch[0].url})
-            found.append(person)
+            batch_found.append(person)
+        return batch_found
+
+    batches = [hits[i : i + chunk] for i in range(0, len(hits), chunk)]
+    from .parallel import map_parallel, worker_count
+
+    parts = map_parallel(
+        batches,
+        _process_batch,
+        max_workers=worker_count("LLM_WORKERS", 4),
+        env_name="LLM_WORKERS",
+        default_workers=4,
+    )
+    for part in parts:
+        found.extend(part)
     return found

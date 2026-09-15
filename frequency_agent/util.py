@@ -1,8 +1,18 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+from pathlib import Path
 from urllib.parse import urlparse
+
+
+def default_db_path() -> Path:
+    """SQLite path. Override with FREQUENCY_DB_PATH for Docker volumes / production."""
+    env = (os.getenv("FREQUENCY_DB_PATH") or "").strip()
+    if env:
+        return Path(env)
+    return Path(__file__).resolve().parent.parent / "frequency_agent.db"
 
 
 def slug_id(*parts: str) -> str:
