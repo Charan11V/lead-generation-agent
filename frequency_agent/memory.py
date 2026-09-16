@@ -12,7 +12,6 @@ from pathlib import Path
 from .similarity import (
     PIPELINE_STATUSES,
     can_transition,
-    find_similar,
     identity_from_lead,
     normalize_pipeline_status,
     require_comment,
@@ -1010,40 +1009,6 @@ class Memory:
                 ).fetchall()
         return [dict(r) for r in rows]
 
-    def find_similar_pipeline(
-        self,
-        identity: dict | None = None,
-        *,
-        lead: dict | None = None,
-        pipeline_id: int | None = None,
-        exclude_owner_lead: tuple[str, str] | None = None,
-    ) -> list[dict]:
-        """Cross-user similarity against every pipeline row."""
-        row = None
-        if pipeline_id is not None:
-            row = self.get_pipeline_item(pipeline_id)
-        if identity is None:
-            if lead is not None:
-                identity = identity_from_lead(lead)
-            elif row is not None:
-                from .similarity import identity_from_pipeline
-
-                identity = identity_from_pipeline(row)
-            else:
-                return []
-        exclude_id = int(pipeline_id) if pipeline_id is not None else None
-        if exclude_owner_lead is None and row is not None:
-            exclude_owner_lead = (
-                (row.get("owner_email") or "").strip().lower(),
-                row.get("lead_id") or "",
-            )
-        return find_similar(
-            identity,
-            self.list_team_pipeline(),
-            exclude_pipeline_id=exclude_id,
-            exclude_owner_lead=exclude_owner_lead,
-        )
-
     def load_all_payloads(self) -> list[dict]:
         owner_sql = self._owner_filter()
         with self._connect() as conn:
@@ -1850,6 +1815,16 @@ class Memory:
                     "leads",
                 ):
                     conn.execute(f"DELETE FROM {table} WHERE owner_email = ?", (owner,))
+                news_tables = {
+                    r[0]
+                    for r in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }
+                if "news_items" in news_tables:
+                    conn.execute("DELETE FROM news_items WHERE owner_email = ?", (owner,))
+                if "news_scans" in news_tables:
+                    conn.execute("DELETE FROM news_scans WHERE owner_email = ?", (owner,))
             else:
                 for table in (
                     "pipeline_events",
@@ -1863,6 +1838,16 @@ class Memory:
                     "leads",
                 ):
                     conn.execute(f"DELETE FROM {table}")
+                news_tables = {
+                    r[0]
+                    for r in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }
+                if "news_items" in news_tables:
+                    conn.execute("DELETE FROM news_items")
+                if "news_scans" in news_tables:
+                    conn.execute("DELETE FROM news_scans")
             if not keep_page_cache:
                 conn.execute("DELETE FROM page_cache")
 

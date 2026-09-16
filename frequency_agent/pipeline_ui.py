@@ -1,4 +1,4 @@
-"""Workspace pipeline + team board + queue similarity flags."""
+"""Workspace pipeline + team board + working queue."""
 
 from __future__ import annotations
 
@@ -10,8 +10,6 @@ import streamlit as st
 from .similarity import (
     PIPELINE_STATUSES,
     PIPELINE_STATUS_LABELS,
-    find_similar,
-    identity_from_pipeline,
     is_closed_status,
     next_pipeline_actions,
     normalize_pipeline_status,
@@ -19,7 +17,6 @@ from .similarity import (
     status_label,
 )
 from .ui import empty_state_html
-from .repo_ui import open_repo_cluster, render_similar_highlight
 
 
 def _esc(text: str) -> str:
@@ -40,11 +37,6 @@ def _owner_label(email: str, profiles: dict[str, dict] | None = None) -> str:
     if name:
         return f"{name} · {email}"
     return email or "unknown"
-
-
-def open_similar_cluster(pipeline_id: int) -> None:
-    """Jump to the central repo focused on this item and its matches."""
-    open_repo_cluster(pipeline_id)
 
 
 def stepper_html(status: str) -> str:
@@ -78,7 +70,6 @@ def pipeline_card_html(
     item: dict,
     *,
     show_owner: bool = False,
-    similar_n: int = 0,
     signal_text: str = "",
     contacts_line: str = "",
 ) -> str:
@@ -91,7 +82,6 @@ def pipeline_card_html(
     comment = _clip(item.get("comment") or "", 140)
     owner = item.get("owner_email") or ""
     owner_line = f'<p class="fx-pipe-meta">Owner · {_esc(owner)}</p>' if show_owner else ""
-    sim = f'<span class="badge warn">Similar · {similar_n}</span>' if similar_n else ""
     signal_line = (
         f'<p class="fx-pipe-meta">Signal · {_esc(_clip(signal_text, 140))}</p>'
         if (signal_text or "").strip()
@@ -106,7 +96,6 @@ def pipeline_card_html(
 <div class="fx-pipe-card">
   <div class="fx-pipe-top">
     <p class="fx-kicker">{_esc(status_label(status))}</p>
-    {sim}
   </div>
   <h3>{_esc(company)}</h3>
   {contacts_block}
@@ -148,35 +137,6 @@ def pipeline_detail_html(item: dict, *, show_owner: bool = True) -> str:
   {f'<p class="fx-pipe-comment">{_esc(comment)}</p>' if comment else '<p class="fx-pipe-meta">No comment yet.</p>'}
 </div>
 """
-
-
-def _similar_hits(item: dict, team: list[dict]) -> list[dict]:
-    return find_similar(
-        identity_from_pipeline(item),
-        team,
-        exclude_pipeline_id=int(item["id"]),
-    )
-
-
-def _cluster_for(item: dict, team: list[dict]) -> list[dict]:
-    hits = _similar_hits(item, team)
-    return [item] + hits
-
-
-def render_similar_block(
-    item: dict,
-    hits: list[dict],
-    *,
-    key_prefix: str,
-    allow_queue_note: bool = False,
-) -> None:
-    """Highlight + jump into the central repo cluster."""
-    render_similar_highlight(
-        item,
-        hits,
-        key=f"{key_prefix}-sim-go-{item.get('id')}",
-        allow_queue=allow_queue_note,
-    )
 
 
 def _advance(memory, item: dict, to_status: str, comment: str, *, is_admin: bool) -> None:
@@ -297,7 +257,6 @@ def _status_options() -> list[str]:
 
 def render_my_pipeline(*, memory, owner_email: str, is_admin: bool = False) -> None:
     items = memory.list_pipeline()
-    team = memory.list_team_pipeline()
     stats = memory.pipeline_stats(team=False)
     st.markdown("##### My pipeline")
     st.caption("Advance each item in order: outreach sent → response received (becomes ongoing) → success or failure.")
@@ -312,7 +271,7 @@ def render_my_pipeline(*, memory, owner_email: str, is_admin: bool = False) -> N
         st.markdown(
             empty_state_html(
                 "Nothing in your pipeline yet",
-                "Queue a result from Results — it lands here even if similar items already exist.",
+                "Queue a result from Results — it lands here for you to advance.",
             ),
             unsafe_allow_html=True,
         )
@@ -326,9 +285,7 @@ def render_my_pipeline(*, memory, owner_email: str, is_admin: bool = False) -> N
     )
     shown = [i for i in items if filter_status == "all" or i.get("pipeline_status") == filter_status]
     for item in shown:
-        hits = _similar_hits(item, team)
-        st.markdown(pipeline_card_html(item, similar_n=len(hits)), unsafe_allow_html=True)
-        render_similar_block(item, hits, key_prefix="mine")
+        st.markdown(pipeline_card_html(item), unsafe_allow_html=True)
         render_status_stepper(
             memory,
             item,
@@ -350,46 +307,10 @@ def render_my_pipeline(*, memory, owner_email: str, is_admin: bool = False) -> N
 def render_team_board(*, memory, owner_email: str, is_admin: bool = False, profiles: dict | None = None) -> None:
     items = memory.list_team_pipeline()
     stats = memory.pipeline_stats(team=True)
-    focus_id = int(st.session_state.get("similar_focus_id") or 0)
     open_id = int(st.session_state.get("team_open_id") or 0)
 
     st.markdown("##### Team board")
     st.caption("Shared list of everyone who queued a company or person. Click an item to see full status.")
-
-    if focus_id:
-        focus = next((i for i in items if int(i["id"]) == focus_id), None)
-        if focus:
-            cluster = _cluster_for(focus, items)
-            st.info(
-                f"Similar cluster for {focus.get('company') or 'this company'} · "
-                f"{len(cluster)} item(s) including yours."
-            )
-            if st.button("Show full team board", key="pipe-clear-focus"):
-                st.session_state.similar_focus_id = 0
-                st.rerun()
-            st.markdown("##### Similar items")
-            for row in cluster:
-                pid = int(row["id"])
-                mine = (row.get("owner_email") or "").lower() == (owner_email or "").lower()
-                you = " · you" if mine else ""
-                label = (
-                    f"{row.get('company') or '—'} · {row.get('person_name') or 'no person'} · "
-                    f"{row.get('owner_email') or ''} · {status_label(row.get('pipeline_status') or '')}{you}"
-                )
-                if st.button(label, key=f"cluster-open-{pid}", use_container_width=True):
-                    st.session_state.team_open_id = pid
-                    st.rerun()
-            chosen = next((r for r in cluster if int(r["id"]) == open_id), cluster[0])
-            st.markdown("##### Full status")
-            render_pipeline_detail(
-                memory,
-                chosen,
-                owner_email=owner_email,
-                is_admin=is_admin,
-                key_prefix=f"cluster-{chosen['id']}",
-                show_owner=True,
-            )
-            return
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Team items", stats.get("total") or 0)
@@ -449,22 +370,18 @@ def render_team_board(*, memory, owner_email: str, is_admin: bool = False, profi
 
     st.caption(f"{len(shown)} of {len(items)} items — click a row to open full status")
     for item in shown:
-        hits = _similar_hits(item, items)
         mine = (item.get("owner_email") or "").lower() == (owner_email or "").lower()
         you = " · you" if mine else ""
-        sim = f" · similar {len(hits)}" if hits else ""
         label = (
             f"{item.get('company') or '—'} · {item.get('person_name') or 'no person'} · "
-            f"{item.get('owner_email') or ''} · {status_label(item.get('pipeline_status') or '')}{you}{sim}"
+            f"{item.get('owner_email') or ''} · {status_label(item.get('pipeline_status') or '')}{you}"
         )
         if st.button(label, key=f"team-open-{item['id']}", use_container_width=True):
             st.session_state.team_open_id = int(item["id"])
-            st.session_state.similar_focus_id = int(item["id"]) if hits else 0
             st.rerun()
 
     chosen = next((i for i in shown if int(i["id"]) == open_id), None)
     if chosen:
-        hits = _similar_hits(chosen, items)
         st.markdown("##### Full status")
         render_pipeline_detail(
             memory,
@@ -474,8 +391,6 @@ def render_team_board(*, memory, owner_email: str, is_admin: bool = False, profi
             key_prefix=f"team-d-{chosen['id']}",
             show_owner=True,
         )
-        if hits:
-            render_similar_block(chosen, hits, key_prefix=f"team-d-{chosen['id']}")
 
 
 def render_working_queue(*, memory, owner_email: str, is_admin: bool = False) -> None:
@@ -486,14 +401,12 @@ def render_working_queue(*, memory, owner_email: str, is_admin: bool = False) ->
     items = memory.list_pipeline()
     if not items:
         return
-    team = memory.list_team_pipeline()
     st.markdown("#### Queue")
     st.caption(
         "One card per company. Update status here (outreach sent, response received, closed), "
         "or remove an item from the queue. Detailed view shows only the messages you selected."
     )
     for item in items:
-        hits = _similar_hits(item, team)
         bundle = {}
         qid = item.get("send_queue_id")
         row = None
@@ -526,7 +439,6 @@ def render_working_queue(*, memory, owner_email: str, is_admin: bool = False) ->
         st.markdown(
             pipeline_card_html(
                 item,
-                similar_n=len(hits),
                 signal_text=signal_text,
                 contacts_line=contacts_line,
             ),
@@ -534,12 +446,6 @@ def render_working_queue(*, memory, owner_email: str, is_admin: bool = False) ->
         )
         if n_msg:
             st.caption(f"{n_msg} selected message(s) queued for this company.")
-        render_similar_highlight(
-            item,
-            hits,
-            key=f"q-sim-go-{item.get('id')}",
-            allow_queue=True,
-        )
 
         can_edit = (item.get("owner_email") or "").lower() == (owner_email or "").lower()
         can_remove = can_edit or is_admin
@@ -636,21 +542,6 @@ def render_working_queue(*, memory, owner_email: str, is_admin: bool = False) ->
                 st.markdown(pipeline_detail_html(item, show_owner=False), unsafe_allow_html=True)
                 st.caption("No selected-message bundle stored for this older queue item.")
         st.divider()
-
-
-def render_results_similarity(memory, lead: dict, *, owner_email: str) -> None:
-    hits = memory.find_similar_pipeline(
-        lead=lead,
-        exclude_owner_lead=(owner_email, lead.get("lead_id") or ""),
-    )
-    if not hits:
-        return
-    render_similar_highlight(
-        None,
-        hits,
-        key=f"res-sim-go-{lead.get('lead_id')}",
-        allow_queue=True,
-    )
 
 
 def render_admin_pipeline(memory) -> None:

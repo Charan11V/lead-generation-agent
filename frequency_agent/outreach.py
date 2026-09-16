@@ -265,14 +265,6 @@ def draft_for_person(
     """Craft one email (+ LinkedIn note) tailored to a specific person or role."""
     tone = load_tone()
     lead = _ensure_matched_proofs(lead, icp)
-    if not lead.signal.usable_in_outreach:
-        blocked = (
-            f"[BLOCKED — DO NOT SEND]\n"
-            f"Signal for {lead.name} is {lead.signal.confidence}. "
-            f"Verify the source before sending.\n"
-            f"Signal note: {lead.signal.summary or 'none'}"
-        )
-        return blocked, blocked, ["Signal not usable in outreach"]
 
     contact_line = _contact_line(person)
     why = ""
@@ -280,6 +272,14 @@ def draft_for_person(
         why = person.why or getattr(person, "likelihood_reason", "") or ""
     elif isinstance(person, dict):
         why = person.get("why") or person.get("likelihood_reason") or ""
+
+    signal_note = ""
+    if not lead.signal.usable_in_outreach:
+        signal_note = (
+            f"\nNOTE: Signal confidence is {lead.signal.confidence or 'UNVERIFIED'} / weak. "
+            "Still write a usable sample email + LinkedIn note for human review. "
+            "Do not invent a stronger signal than the brief shows; keep the hook cautious.\n"
+        )
 
     system = _draft_system(tone, mode=mode)
     user = f"""
@@ -294,7 +294,7 @@ Stage: {lead.funding_stage}
 
 Recipient ({mode}): {contact_line}
 Why this recipient: {why or 'Playbook-fit decision-maker / best approach path for this ICP.'}
-
+{signal_note}
 Signal ({lead.signal.confidence}, {lead.signal.type}, date={lead.signal.date}):
 {lead.signal.summary}
 Evidence quote: {lead.signal.evidence_quote}
@@ -343,14 +343,6 @@ def draft_for_approach_channel(
     """Indirect: email aimed at company approach channel / role, not a named DM."""
     tone = load_tone()
     lead = _ensure_matched_proofs(lead, icp)
-    if not lead.signal.usable_in_outreach:
-        blocked = (
-            f"[BLOCKED — DO NOT SEND]\n"
-            f"Signal for {lead.name} is {lead.signal.confidence}. "
-            f"Verify the source before sending.\n"
-            f"Signal note: {lead.signal.summary or 'none'}"
-        )
-        return blocked, blocked, ["Signal not usable in outreach"]
 
     channel = lead.best_approach_channel or ""
     chans = lead.approach_channels or []
@@ -361,6 +353,13 @@ def draft_for_approach_channel(
         for c in chans[:5]
     )
     role_hint = lead.contact.role if lead.contact and lead.contact.role not in {"unknown", ""} else "Founder / CEO"
+    signal_note = ""
+    if not lead.signal.usable_in_outreach:
+        signal_note = (
+            f"\nNOTE: Signal confidence is {lead.signal.confidence or 'UNVERIFIED'} / weak. "
+            "Still write a usable sample email + LinkedIn note for human review. "
+            "Do not invent a stronger signal than the brief shows; keep the hook cautious.\n"
+        )
     system = _draft_system(tone, mode="indirect")
     user = f"""
 ICP: {icp.get('raw_text')}
@@ -377,7 +376,7 @@ All company channels:
 {chan_lines or '(none listed — write as if to the company / ' + role_hint + ' desk)'}
 Intended function to reach: {role_hint}
 No verified named decision-maker was found — do NOT invent a person name.
-
+{signal_note}
 Signal ({lead.signal.confidence}, {lead.signal.type}, date={lead.signal.date}):
 {lead.signal.summary}
 Evidence quote: {lead.signal.evidence_quote}
@@ -458,9 +457,9 @@ def attach_person_drafts(
             email, li, _flags = draft_for_person(llm, lead, p, icp, mode="direct")
             email = (email or "").strip()
             li = (li or "").strip()
-            if email and not li and not email.startswith("[BLOCKED"):
+            if email and not li:
                 li = _linkedin_fallback_from_email(email)
-            if li and not email and not li.startswith("[BLOCKED"):
+            if li and not email:
                 email = li
             return p.model_copy(update={"email_draft": email, "linkedin_note": li})
 
@@ -484,14 +483,16 @@ def attach_person_drafts(
         lead.qa_flags = qa_outreach(lead, lead.email_draft, lead.linkedin_note)
         return lead
 
-    # Indirect / role-only — still one email + one LinkedIn/company note
+    # Indirect / role-only / no contacts — still one email + one LinkedIn note for the company
     email, li, flags = draft_for_approach_channel(llm, lead, icp) if (
         lead.approach_channels or lead.best_approach_channel
     ) else draft_for_person(llm, lead, lead.contact, icp, mode="indirect")
     email = (email or "").strip()
     li = (li or "").strip()
-    if email and not li and not email.startswith("[BLOCKED"):
+    if email and not li:
         li = _linkedin_fallback_from_email(email)
+    if li and not email:
+        email = li
     lead.email_draft = email
     lead.linkedin_note = li
     lead.qa_flags = flags

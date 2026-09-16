@@ -9,6 +9,7 @@ from frequency_agent.folder_browse import (
     default_save_folder,
     list_subfolders,
     parent_within_roots,
+    sanitize_zip_file_name,
 )
 
 
@@ -30,3 +31,10 @@ def test_list_subfolders_and_parent(tmp_path: Path):
     assert [p.name for p in list_subfolders(root)] == ["leads"]
     assert parent_within_roots(child, [root]) == root
     assert parent_within_roots(root, [root]) is None
+
+
+def test_sanitize_zip_file_name():
+    assert sanitize_zip_file_name("out.zip") == "out.zip"
+    assert sanitize_zip_file_name("my export") == "my export.zip"
+    assert sanitize_zip_file_name('bad/\\"name.zip') == "badname.zip"
+    assert sanitize_zip_file_name("") == "frequency_selected_fetches.zip"

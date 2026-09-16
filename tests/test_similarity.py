@@ -1,12 +1,9 @@
-"""Canonical entity IDs and cross-result similarity."""
+"""Canonical entity IDs and pipeline status helpers."""
 
 from frequency_agent.similarity import (
     company_entity_id,
-    company_name_score,
-    find_similar,
     identity_from_lead,
     person_entity_id,
-    similarity_verdict,
 )
 
 
@@ -48,7 +45,15 @@ def test_person_entity_id_prefers_email():
     assert a.startswith("p_")
 
 
-def test_same_domain_is_a_match_across_icps():
+def test_identity_from_lead_extracts_entity_ids():
+    ident = identity_from_lead(_lead())
+    assert ident["company_entity_id"] == company_entity_id("acmepay.com", "Acme Pay")
+    assert ident["person_entity_id"] == person_entity_id(email="jane@acmepay.com")
+    assert ident["domain"] == "acmepay.com"
+    assert ident["person_email"] == "jane@acmepay.com"
+
+
+def test_same_domain_yields_same_company_entity_id():
     left = identity_from_lead(_lead())
     right = identity_from_lead(
         _lead(
@@ -57,38 +62,7 @@ def test_same_domain_is_a_match_across_icps():
             contact={"name": "Priya Sharma", "role": "CHRO", "email": "priya@acmepay.com"},
         )
     )
-    verdict = similarity_verdict(left, right)
-    assert verdict is not None
-    assert verdict["kind"] in {"company", "company_and_person"}
-    assert verdict["company_score"] >= 0.86
-
-
-def test_fuzzy_company_name_without_domain():
-    left = identity_from_lead(_lead(domain="unknown", name="Acme Pay Pvt Ltd"))
-    right = identity_from_lead(
-        _lead(
-            lead_id="lead_b",
-            domain="",
-            name="Acme Pay",
-            contact={"name": "Jane Founder", "email": "other@example.com"},
-        )
-    )
-    assert company_name_score("Acme Pay Pvt Ltd", "Acme Pay") >= 0.86
-    verdict = similarity_verdict(left, right)
-    assert verdict is not None
-
-
-def test_unrelated_companies_do_not_match():
-    left = identity_from_lead(_lead())
-    right = identity_from_lead(
-        _lead(
-            lead_id="lead_z",
-            name="Zoho",
-            domain="zoho.com",
-            contact={"name": "Sridhar Vembu", "email": "sv@zoho.com"},
-        )
-    )
-    assert similarity_verdict(left, right) is None
+    assert left["company_entity_id"] == right["company_entity_id"]
 
 
 def test_status_sequence_is_linear_then_close():
@@ -103,49 +77,3 @@ def test_status_sequence_is_linear_then_close():
     assert not can_transition("queued", "success")
     assert can_transition("outreach_sent", "ongoing")
     assert not can_transition("outreach_sent", "success")
-
-
-def test_same_person_email_flags_even_if_company_label_differs():
-    left = identity_from_lead(_lead())
-    right = identity_from_lead(
-        _lead(
-            lead_id="lead_x",
-            name="AcmePay India",
-            domain="unknown",
-            contact={"name": "Jane F", "email": "jane@acmepay.com"},
-        )
-    )
-    verdict = similarity_verdict(left, right)
-    assert verdict is not None
-    assert verdict["person_score"] >= 0.99
-
-
-def test_find_similar_excludes_self_and_returns_reasons():
-    alice = {
-        "id": 1,
-        "owner_email": "alice@example.com",
-        "lead_id": "lead_a",
-        "company": "Acme Pay",
-        "domain": "acmepay.com",
-        "person_name": "Jane Founder",
-        "person_email": "jane@acmepay.com",
-        "company_entity_id": company_entity_id("acmepay.com", "Acme Pay"),
-        "person_entity_id": person_entity_id(email="jane@acmepay.com"),
-        "pipeline_status": "outreach_sent",
-        "icp_text": "fintech CHRO India",
-    }
-    bob = dict(alice)
-    bob.update(
-        {
-            "id": 2,
-            "owner_email": "bob@example.com",
-            "lead_id": "lead_b",
-            "pipeline_status": "queued",
-            "icp_text": "CXOs after Series B",
-        }
-    )
-    ident = identity_from_lead(_lead())
-    hits = find_similar(ident, [alice, bob], exclude_pipeline_id=2)
-    assert len(hits) == 1
-    assert hits[0]["owner_email"] == "alice@example.com"
-    assert hits[0]["match_reasons"]

@@ -50,25 +50,6 @@ def test_pipeline_is_owner_scoped_but_team_board_is_shared(tmp_path: Path):
     assert team[0]["company_entity_id"] == company_entity_id("acmepay.com", "Acme Pay")
 
 
-def test_similarity_flags_other_user_same_company(tmp_path: Path):
-    db = tmp_path / "sim.db"
-    alice = Memory(path=db, owner_email="alice@example.com")
-    bob = Memory(path=db, owner_email="bob@example.com")
-    a_item = alice.upsert_pipeline_from_lead(
-        _lead("lead_a", "Acme Pay", "acmepay.com", "Jane Founder", "jane@acmepay.com"),
-        icp_text="ICP A",
-    )
-    b_item = bob.upsert_pipeline_from_lead(
-        _lead("lead_b", "Acme Pay Pvt Ltd", "acmepay.com", "Jane Founder", "jane@acmepay.com"),
-        icp_text="ICP B — different brief",
-    )
-    hits = bob.find_similar_pipeline(pipeline_id=int(b_item["id"]))
-    assert len(hits) == 1
-    assert hits[0]["id"] == a_item["id"]
-    assert hits[0]["owner_email"] == "alice@example.com"
-    assert "ICP A" in (hits[0].get("icp_text") or "")
-
-
 def test_status_flow_is_sequential_and_response_becomes_ongoing(tmp_path: Path):
     db = tmp_path / "status.db"
     alice = Memory(path=db, owner_email="alice@example.com")

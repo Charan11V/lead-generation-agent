@@ -98,6 +98,46 @@ def test_attach_person_drafts_for_every_contact():
     assert (lead.linkedin_note or "").strip()
 
 
+def test_attach_drafts_even_when_signal_unverified():
+    llm = _FakeLLM()
+    lead = _lead_with_people()
+    lead.signal = Signal(
+        type="other",
+        summary="Thin public mention only",
+        confidence="UNVERIFIED",
+        usable_in_outreach=False,
+    )
+    out = attach_person_drafts(llm, lead, {"raw_text": "fintech", "service_line": "exec_search"})
+    assert llm.calls == 3
+    assert not (out.email_draft or "").startswith("[BLOCKED")
+    assert (out.email_draft or "").strip()
+    assert (out.linkedin_note or "").strip()
+    for person in out.contacts:
+        assert not (person.email_draft or "").startswith("[BLOCKED")
+        assert (person.email_draft or "").strip()
+        assert (person.linkedin_note or "").strip()
+
+
+def test_attach_drafts_for_company_with_no_named_contacts():
+    llm = _FakeLLM()
+    lead = CompanyLead(
+        lead_id="no-people",
+        name="SparseCo",
+        signal=Signal(
+            type="expansion",
+            summary="SparseCo opened a new office",
+            confidence="MEDIUM",
+            usable_in_outreach=True,
+        ),
+        best_approach_channel="careers@sparse.co",
+    )
+    out = attach_person_drafts(llm, lead, {"raw_text": "saas", "service_line": "exec_search"})
+    assert llm.calls >= 1
+    assert (out.email_draft or "").strip()
+    assert (out.linkedin_note or "").strip()
+    assert not (out.email_draft or "").startswith("[BLOCKED")
+
+
 def test_attach_fills_missing_linkedin_block(monkeypatch):
     class MissingLiLLM:
         def text(self, messages, temperature=0.5):  # noqa: ANN001

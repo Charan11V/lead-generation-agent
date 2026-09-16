@@ -1,8 +1,9 @@
-"""Local folder browse + save helpers for Workspace exports.
+"""Browser + optional server save helpers for Workspace ZIP exports.
 
-Works in Docker (host Documents/Downloads/Desktop mounts + in-app navigator)
-and on a bare Windows/macOS Python run (tkinter dialog when available).
-Also supports Chromium's showDirectoryPicker to write a ZIP into a browsed folder.
+Primary UX (Windows / Mac in Chrome & Edge): OS Save As / folder picker via the
+File System Access API, with an automatic blob-download fallback.
+
+Server-path helpers remain for Docker host mounts (Advanced).
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ def default_save_folder(project_root: Path) -> str:
 
 
 def browse_roots(project_root: Path) -> list[Path]:
-    """Writable roots the user can browse (host mounts first, then project exports)."""
+    """Writable roots for Advanced server-side save (host mounts + exports)."""
     roots: list[Path] = []
     seen: set[str] = set()
 
@@ -39,14 +40,12 @@ def browse_roots(project_root: Path) -> list[Path]:
         seen.add(key)
         roots.append(resolved)
 
-    # Docker / compose host mounts (see docker-compose.override.yml)
     for name in ("Documents", "Downloads", "Desktop"):
         _add(Path("/host") / name)
         env_path = (os.getenv(f"FREQUENCY_HOST_{name.upper()}") or "").strip()
         if env_path:
             _add(Path(env_path))
 
-    # Native local run (outside Docker)
     home = Path.home()
     for name in ("Documents", "Downloads", "Desktop"):
         _add(home / name)
@@ -98,7 +97,7 @@ def parent_within_roots(folder: str | Path, roots: list[Path]) -> Path | None:
 
 
 def tk_pick_folder(initial: str = "") -> str | None:
-    """Native OS folder dialog when display + tkinter are available."""
+    """Native OS folder dialog when display + tkinter are available (local Python)."""
     try:
         import tkinter as tk
         from tkinter import filedialog
@@ -122,41 +121,85 @@ def tk_pick_folder(initial: str = "") -> str | None:
         return None
 
 
-def render_browser_directory_save(
+def sanitize_zip_file_name(file_name: str) -> str:
+    name = (file_name or "").strip() or "frequency_selected_fetches.zip"
+    name = name.replace("\\", "").replace("/", "").replace('"', "").replace("'", "")
+    if not name.lower().endswith(".zip"):
+        name = f"{name}.zip"
+    return name[:180]
+
+
+def render_save_zip_panel(
     zip_bytes: bytes,
     *,
     file_name: str = "frequency_selected_fetches.zip",
-    height: int = 72,
+    fetch_count: int = 0,
+    height: int = 175,
 ) -> None:
     """
-    Chrome/Edge on localhost: native folder picker, then write ZIP into that folder.
-    Uses the parent window when Streamlit embeds this in an iframe.
+    Proper Save UX for Windows/Mac browsers:
+
+    1. showSaveFilePicker → OS Save As (browse + name in the dialog; no in-page name field)
+    2. showDirectoryPicker / blob download → show in-page file name, then save
+
+    Embeds ZIP as base64 so the click handler can write without a second round-trip.
     """
     import streamlit.components.v1 as components
 
-    safe_name = file_name.replace("\\", "").replace('"', "").replace("'", "")
+    safe_name = sanitize_zip_file_name(file_name)
     b64 = base64.b64encode(zip_bytes).decode("ascii")
-    label = html.escape("Browse folder & save ZIP")
+    n = max(0, int(fetch_count or 0))
+    count_bit = f" · {n} fetch{'es' if n != 1 else ''}" if n else ""
+
     markup = f"""
-<div style="font-family: system-ui, sans-serif; padding: 0.15rem 0;">
-  <button id="fx-browse-save" style="
-      cursor:pointer; padding:0.45rem 0.9rem; border-radius:8px;
-      border:1px solid #1a6b63; background:#0d9488; color:#fff; font-weight:600;">
-    {label}
+<div style="
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+  padding: 0.35rem 0.15rem 0.15rem;
+  color: #0f172a;
+">
+  <div id="fx-name-row" style="display:none; margin-bottom:0.55rem;">
+    <label for="fx-zip-name" style="display:block; font-size:0.8rem; font-weight:600; margin-bottom:0.25rem;">
+      File name
+    </label>
+    <input id="fx-zip-name" type="text" value="{html.escape(safe_name)}"
+      style="
+        width:100%; box-sizing:border-box; padding:0.45rem 0.6rem;
+        border:1px solid #cbd5e1; border-radius:8px; font-size:0.9rem;
+      " />
+    <div style="margin-top:0.25rem; font-size:0.72rem; color:#94a3b8;">
+      Your browser’s save dialog won’t let you rename here — set the name above.
+    </div>
+  </div>
+  <button id="fx-save-zip" type="button" style="
+      width:100%; cursor:pointer; padding:0.55rem 0.9rem; border-radius:8px;
+      border:1px solid #0f766e; background:#0d9488; color:#fff;
+      font-weight:650; font-size:0.95rem;">
+    Save ZIP to this PC{html.escape(count_bit)}…
   </button>
-  <div id="fx-browse-status" style="margin-top:0.35rem; font-size:0.85rem; color:#334155;"></div>
+  <div id="fx-save-status" style="margin-top:0.4rem; font-size:0.82rem; color:#64748b; min-height:1.2em;"></div>
+  <div id="fx-save-hint" style="margin-top:0.15rem; font-size:0.75rem; color:#94a3b8;"></div>
 </div>
 <script>
 (function() {{
-  const fileName = {safe_name!r};
+  const defaultName = {safe_name!r};
   const b64 = {b64!r};
-  const status = document.getElementById("fx-browse-status");
-  const btn = document.getElementById("fx-browse-save");
+  const status = document.getElementById("fx-save-status");
+  const hint = document.getElementById("fx-save-hint");
+  const btn = document.getElementById("fx-save-zip");
+  const nameRow = document.getElementById("fx-name-row");
+  const nameInput = document.getElementById("fx-zip-name");
 
-  function setStatus(msg, ok) {{
+  function setStatus(msg, kind) {{
     if (!status) return;
-    status.textContent = msg;
-    status.style.color = ok ? "#0f766e" : "#b45309";
+    status.textContent = msg || "";
+    status.style.color = kind === "ok" ? "#0f766e" : (kind === "err" ? "#b45309" : "#64748b");
+  }}
+
+  function sanitizeName(raw) {{
+    let n = (raw || "").trim() || defaultName;
+    n = n.replace(/[\\\\/:"']/g, "");
+    if (!/\\.zip$/i.test(n)) n = n + ".zip";
+    return n.slice(0, 180);
   }}
 
   function b64ToBytes(s) {{
@@ -166,36 +209,138 @@ def render_browser_directory_save(
     return out;
   }}
 
-  function pickerHost() {{
-    try {{
-      if (window.parent && window.parent.showDirectoryPicker) return window.parent;
-    }} catch (e) {{}}
-    return window;
+  function hosts() {{
+    const list = [];
+    for (const w of [window, window.parent, window.top]) {{
+      try {{
+        if (w && list.indexOf(w) < 0) list.push(w);
+      }} catch (e) {{}}
+    }}
+    return list;
+  }}
+
+  function findApi(name) {{
+    for (const w of hosts()) {{
+      try {{
+        if (w && typeof w[name] === "function") return w[name].bind(w);
+      }} catch (e) {{}}
+    }}
+    return null;
+  }}
+
+  const hasSaveAs = !!findApi("showSaveFilePicker");
+  const hasDirPicker = !!findApi("showDirectoryPicker");
+  // Name in-page only when OS Save As (with rename) is unavailable.
+  const needInPageName = !hasSaveAs;
+  if (nameRow) nameRow.style.display = needInPageName ? "block" : "none";
+  if (hint) {{
+    if (hasSaveAs) {{
+      hint.textContent = "Opens your normal Save dialog — choose the folder and file name there.";
+    }} else if (hasDirPicker) {{
+      hint.textContent = "Opens a folder picker. Set the file name above, then choose the folder.";
+    }} else {{
+      hint.textContent = "This browser has no folder dialog — set a name above, or use Download ZIP below.";
+    }}
+  }}
+
+  function blobDownload(fileName, bytes) {{
+    const blob = new Blob([bytes], {{ type: "application/zip" }});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function() {{
+      URL.revokeObjectURL(url);
+      a.remove();
+    }}, 1500);
+    setStatus("Download started — pick a folder in your browser’s save dialog (or check Downloads).", "ok");
+  }}
+
+  async function saveWithPicker(fileName, bytes) {{
+    const savePicker = findApi("showSaveFilePicker");
+    if (savePicker) {{
+      const handle = await savePicker({{
+        suggestedName: defaultName,
+        types: [{{
+          description: "ZIP archive",
+          accept: {{ "application/zip": [".zip"] }}
+        }}]
+      }});
+      const writable = await handle.createWritable();
+      await writable.write(bytes);
+      await writable.close();
+      const savedAs = (handle && handle.name) ? handle.name : defaultName;
+      setStatus("Saved “" + savedAs + "” to the folder you chose.", "ok");
+      return true;
+    }}
+
+    const dirPicker = findApi("showDirectoryPicker");
+    if (dirPicker) {{
+      const dir = await dirPicker({{ mode: "readwrite" }});
+      const handle = await dir.getFileHandle(fileName, {{ create: true }});
+      const writable = await handle.createWritable();
+      await writable.write(bytes);
+      await writable.close();
+      const where = dir.name ? ("“" + dir.name + "”") : "the selected folder";
+      setStatus("Saved “" + fileName + "” to " + where + ".", "ok");
+      return true;
+    }}
+    return false;
   }}
 
   btn.addEventListener("click", async function() {{
-    const host = pickerHost();
-    if (!host.showDirectoryPicker) {{
-      setStatus("Folder picker needs Chrome or Edge. Use Download below, or browse folders in the list.", false);
-      return;
-    }}
+    const fileName = needInPageName
+      ? sanitizeName(nameInput ? nameInput.value : defaultName)
+      : defaultName;
+    if (needInPageName && nameInput) nameInput.value = fileName;
+    btn.disabled = true;
+    setStatus("Opening save dialog…", "info");
+    const bytes = b64ToBytes(b64);
     try {{
-      const dir = await host.showDirectoryPicker({{ mode: "readwrite" }});
-      const handle = await dir.getFileHandle(fileName, {{ create: true }});
-      const writable = await handle.createWritable();
-      await writable.write(b64ToBytes(b64));
-      await writable.close();
-      const where = dir.name ? ("“" + dir.name + "”") : "the selected folder";
-      setStatus("Saved " + fileName + " to " + where + " on this computer.", true);
+      const ok = await saveWithPicker(fileName, bytes);
+      if (!ok) {{
+        if (!needInPageName && nameRow) {{
+          nameRow.style.display = "block";
+          if (hint) hint.textContent = "Set the file name above, then try again — or use Download ZIP.";
+        }}
+        blobDownload(fileName, bytes);
+      }}
     }} catch (err) {{
       if (err && err.name === "AbortError") {{
-        setStatus("Cancelled.", false);
-        return;
+        setStatus("Cancelled.", "info");
+      }} else {{
+        try {{
+          if (nameRow) nameRow.style.display = "block";
+          blobDownload(sanitizeName(nameInput ? nameInput.value : fileName), bytes);
+          setStatus(
+            "Folder dialog unavailable here — started a normal download instead.",
+            "err"
+          );
+        }} catch (e2) {{
+          setStatus(
+            "Could not save (" + ((err && err.message) || err) + "). Use Download ZIP below.",
+            "err"
+          );
+        }}
       }}
-      setStatus("Could not save there (" + ((err && err.message) || err) + "). Try Download, or pick a folder below.", false);
+    }} finally {{
+      btn.disabled = false;
     }}
   }});
 }})();
 </script>
 """
     components.html(markup, height=height)
+
+
+# Back-compat alias
+def render_browser_directory_save(
+    zip_bytes: bytes,
+    *,
+    file_name: str = "frequency_selected_fetches.zip",
+    height: int = 175,
+) -> None:
+    render_save_zip_panel(zip_bytes, file_name=file_name, height=height)

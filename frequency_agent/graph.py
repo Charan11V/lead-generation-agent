@@ -517,36 +517,19 @@ def _enrich_cluster(
     lead.discovery_web_query = cluster.get("discovery_web_query") or ""
     lead.query_id = query_id or ""
 
-    if lead.signal.usable_in_outreach:
-        lead.why_interested = explain_interest(llm, lead, icp)
-        lead = attach_person_drafts(llm, lead, icp.model_dump())
-        if lead.qa_flags:
-            lead.review_status = "needs_edit"
-    else:
-        lead.why_interested = explain_interest(llm, lead, icp)
-        blocked = (
-            f"[BLOCKED — DO NOT SEND] Unverified or weak signal for {lead.name}. "
-            f"Confidence={lead.signal.confidence}. {lead.signal.inferred_reason}"
+    # Always generate sample mail + LinkedIn for every company (named contacts or company channel).
+    lead.why_interested = explain_interest(llm, lead, icp)
+    lead = attach_person_drafts(llm, lead, icp.model_dump())
+    if not lead.signal.usable_in_outreach:
+        flag = (
+            f"Signal confidence is {lead.signal.confidence or 'UNVERIFIED'} — sample drafts were still "
+            "generated for review; verify before sending."
         )
-        lead.email_draft = blocked
-        lead.linkedin_note = blocked
-        if lead.verified_contacts:
-            lead.verified_contacts = [
-                c.model_copy(update={"email_draft": blocked, "linkedin_note": blocked})
-                for c in lead.verified_contacts
-            ]
-            lead.contacts = [
-                c.model_copy(update={"email_draft": blocked, "linkedin_note": blocked})
-                for c in (lead.contacts or lead.verified_contacts)
-            ]
-            if not lead.contacts:
-                lead.contacts = list(lead.verified_contacts)
-        elif lead.contacts:
-            lead.contacts = [
-                c.model_copy(update={"email_draft": blocked, "linkedin_note": blocked})
-                for c in lead.contacts
-            ]
-        lead.qa_flags = ["Signal not usable in outreach"]
+        lead.qa_flags = list(lead.qa_flags or [])
+        if flag not in lead.qa_flags:
+            lead.qa_flags.append(flag)
+        lead.review_status = "needs_edit"
+    elif lead.qa_flags:
         lead.review_status = "needs_edit"
 
     sig_hash = hashlib.sha256((lead.signal.summary or "").encode()).hexdigest()[:16]

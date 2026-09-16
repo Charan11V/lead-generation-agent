@@ -77,6 +77,8 @@ def test_light_and_dark_theme_css():
     assert "--btn-primary-bg: #0E7A96" in dark
     assert "--btn-secondary-fg: #0E141B" in light
     assert "--btn-secondary-fg: #F3F7FB" in dark
+    assert ".fx-desk-hero" in light
+    assert ".fx-news-card" in dark
 
 def test_new_shell_helpers():
     assert "Launch a brief" in composer_header_html()

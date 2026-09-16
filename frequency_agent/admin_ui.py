@@ -16,6 +16,7 @@ from .accounts import (
 from .auth import AuthStore
 from .memory import Memory, resolve_search_name
 from .pipeline_ui import render_admin_pipeline
+from .news_ui import render_admin_signal_panel
 from .search_export import full_results_json_text, search_csv_text
 
 
@@ -147,8 +148,8 @@ def render_admin_page(
     c5.metric("Send queue", sum(r["send_queue"] for r in rows))
     c6.metric("Pipeline", sum(r["pipeline"] for r in rows))
 
-    tab_all, tab_users, tab_monitor, tab_pipeline = st.tabs(
-        ["All activity", "Users", "Monitor user", "Pipeline"]
+    tab_all, tab_users, tab_monitor, tab_pipeline, tab_news = st.tabs(
+        ["All activity", "Users", "Monitor user", "Pipeline", "Signal desk"]
     )
 
     with tab_all:
@@ -254,6 +255,9 @@ def render_admin_page(
 
     with tab_pipeline:
         render_admin_pipeline(memory)
+
+    with tab_news:
+        render_admin_signal_panel(memory=memory, viewer_email=viewer_email)
 
     with tab_monitor:
         if not emails:

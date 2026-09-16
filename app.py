@@ -38,7 +38,12 @@ from frequency_agent import folder_browse as folder_browse_mod
 from frequency_agent import pipeline_ui as pipeline_ui_mod
 from frequency_agent import similarity as similarity_mod
 from frequency_agent import outreach_queue as outreach_queue_mod
-from frequency_agent import repo_ui as repo_ui_mod
+from frequency_agent import workspace_view as workspace_view_mod
+from frequency_agent import news_relevance as news_relevance_mod
+from frequency_agent import news_sources as news_sources_mod
+from frequency_agent import news_store as news_store_mod
+from frequency_agent import news_desk as news_desk_mod
+from frequency_agent import news_ui as news_ui_mod
 
 importlib.reload(schemas_mod)
 importlib.reload(channels_mod)
@@ -56,7 +61,13 @@ importlib.reload(search_mod)
 importlib.reload(search_export_mod)
 importlib.reload(folder_browse_mod)
 importlib.reload(pipeline_ui_mod)
-importlib.reload(repo_ui_mod)
+importlib.reload(workspace_view_mod)
+importlib.reload(news_relevance_mod)
+importlib.reload(news_sources_mod)
+importlib.reload(news_store_mod)
+importlib.reload(news_desk_mod)
+importlib.reload(news_ui_mod)
+# Do not reload news_eval — Check-relevance worker threads must stay process-stable.
 importlib.reload(graph_mod)
 importlib.reload(mailer_mod)
 importlib.reload(clerk_client_mod)
@@ -71,6 +82,8 @@ importlib.reload(auth_ui_mod)
 from frequency_agent.llm import load_json
 from frequency_agent.icp import service_line_label
 from frequency_agent.memory import Memory, format_fetch_label, resolve_search_name
+from frequency_agent.workspace_view import fetch_more_guard, merge_run_payloads
+from frequency_agent.news_ui import render_signal_desk_page
 from frequency_agent.auth_ui import current_user, render_account_chip, require_login
 from frequency_agent.accounts import get_account_store
 from frequency_agent.admin_ui import render_admin_page
@@ -89,10 +102,8 @@ search_contact_rows = search_export_mod.search_contact_rows
 search_csv_text = search_export_mod.search_csv_text
 browse_roots = folder_browse_mod.browse_roots
 default_save_folder = folder_browse_mod.default_save_folder
-list_subfolders = folder_browse_mod.list_subfolders
-parent_within_roots = folder_browse_mod.parent_within_roots
 tk_pick_folder = folder_browse_mod.tk_pick_folder
-render_browser_directory_save = folder_browse_mod.render_browser_directory_save
+render_save_zip_panel = folder_browse_mod.render_save_zip_panel
 from frequency_agent.send_queue import can_enqueue
 from frequency_agent.outreach_queue import (
     apply_target_edits,
@@ -102,11 +113,9 @@ from frequency_agent.outreach_queue import (
 )
 from frequency_agent.pipeline_ui import (
     render_my_pipeline,
-    render_results_similarity,
     render_team_board,
     render_working_queue,
 )
-from frequency_agent.repo_ui import render_central_repo
 from frequency_agent.ui import (
     agent_stages_html,
     composer_header_html,
@@ -147,6 +156,10 @@ if "queries" not in st.session_state:
     st.session_state.queries = []
 if "active_run_id" not in st.session_state:
     st.session_state.active_run_id = ""
+if "active_run_ids" not in st.session_state:
+    st.session_state.active_run_ids = []
+if "view_query_ids" not in st.session_state:
+    st.session_state.view_query_ids = []
 if "active_query_id" not in st.session_state:
     st.session_state.active_query_id = ""
 if "active_icp_hash" not in st.session_state:
@@ -203,14 +216,8 @@ if "job_panel_expanded" not in st.session_state:
     st.session_state.job_panel_expanded = False
 if "ws_section" not in st.session_state:
     st.session_state.ws_section = "searches"
-if "similar_focus_id" not in st.session_state:
-    st.session_state.similar_focus_id = 0
 if "team_open_id" not in st.session_state:
     st.session_state.team_open_id = 0
-if "repo_open_id" not in st.session_state:
-    st.session_state.repo_open_id = 0
-if "repo_page" not in st.session_state:
-    st.session_state.repo_page = 1
 
 st.markdown(inject(st.session_state.ui_theme), unsafe_allow_html=True)
 
@@ -239,12 +246,18 @@ if st.session_state.get("auth_owner_email") != _owner_email:
     st.session_state.queries = []
     st.session_state.selected = 0
     st.session_state.active_run_id = ""
+    st.session_state.active_run_ids = []
+    st.session_state.view_query_ids = []
     st.session_state.active_query_id = ""
     st.session_state.active_icp_hash = ""
     st.session_state.csv_path = ""
     st.session_state.icp_text_saved = ""
     st.session_state.view_label = ""
     st.session_state.composer_open = False
+    st.session_state.news_sel = set()
+    st.session_state.news_view_mode = "window"
+    st.session_state.news_notice = ""
+    st.session_state.news_last_added = 0
 
 presets = load_json("icp_presets.json")
 memory = Memory(owner_email=_owner_email)
@@ -267,34 +280,72 @@ def _theme_button_label() -> str:
 
 
 def apply_run(run: dict) -> None:
+    """Load a single fetch into Results (also used after agent jobs)."""
+    apply_runs([run] if run else [])
+
+
+def apply_runs(runs: list[dict]) -> None:
+    """Load one or more fetches into Results (merged, lead_id-deduped)."""
     st.session_state.composer_open = False
-    st.session_state.leads = run.get("leads") or []
-    st.session_state.funnel = run.get("funnel") or {}
-    st.session_state.logs = run.get("logs") or []
-    st.session_state.queries = run.get("queries") or []
-    st.session_state.active_run_id = run.get("run_id") or ""
-    st.session_state.active_query_id = run.get("query_id") or st.session_state.active_query_id
-    st.session_state.active_icp_hash = run.get("icp_hash") or ""
-    st.session_state.csv_path = run.get("csv_path") or ""
-    st.session_state.inferred_service_line = run.get("service_line") or ""
-    icp_text = run.get("icp") or ""
-    st.session_state.icp_text_saved = icp_text
-    st.session_state.pending_icp_text = icp_text
+    merged = merge_run_payloads([r for r in runs if r])
+    st.session_state.leads = merged.get("leads") or []
+    st.session_state.funnel = merged.get("funnel") or {}
+    st.session_state.logs = merged.get("logs") or []
+    st.session_state.queries = merged.get("queries") or []
+    run_ids = list(merged.get("run_ids") or [])
+    st.session_state.active_run_ids = run_ids
+    st.session_state.active_run_id = merged.get("run_id") or (run_ids[0] if run_ids else "")
+    view_qids = list(merged.get("query_ids") or [])
+    st.session_state.view_query_ids = view_qids
+    qid = (merged.get("query_id") or "").strip()
+    if qid:
+        st.session_state.active_query_id = qid
+    elif len(view_qids) == 1:
+        st.session_state.active_query_id = view_qids[0]
+    # Mixed searches: keep query empty so Fetch more stays blocked
+    elif len(view_qids) > 1:
+        st.session_state.active_query_id = ""
+    st.session_state.active_icp_hash = merged.get("icp_hash") or ""
+    st.session_state.csv_path = merged.get("csv_path") or ""
+    st.session_state.inferred_service_line = merged.get("service_line") or ""
+    icp_text = merged.get("icp") or ""
+    if icp_text:
+        st.session_state.icp_text_saved = icp_text
+        st.session_state.pending_icp_text = icp_text
     st.session_state.selected = 0
     st.session_state.view_mode = "run"
-    st.session_state.view_label = run.get("label") or format_fetch_label(
-        "", run.get("run_id") or "", run.get("finished") or run.get("started") or ""
-    )
-    st.session_state.last_search_mode = "Loaded fetch"
-    qid = run.get("query_id") or ""
-    if qid:
-        sess = memory.get_query_session(qid)
-        if sess and (sess.get("label") or "").strip():
-            st.session_state.pending_search_name = sess["label"]
+    n = len(run_ids)
+    if n > 1:
+        st.session_state.view_label = merged.get("label") or f"{n} fetches · {len(st.session_state.leads)} companies"
+        st.session_state.last_search_mode = f"Loaded {n} fetches"
+    elif n == 1:
+        only = runs[0] if runs else {}
+        st.session_state.view_label = only.get("label") or format_fetch_label(
+            "", only.get("run_id") or "", only.get("finished") or only.get("started") or ""
+        )
+        st.session_state.last_search_mode = "Loaded fetch"
+    else:
+        st.session_state.view_label = ""
+        st.session_state.last_search_mode = ""
+    if qid or len(view_qids) == 1:
+        sess = memory.get_query_session(qid or view_qids[0])
+        if sess:
+            if (sess.get("label") or "").strip():
+                st.session_state.pending_search_name = sess["label"]
+            if not icp_text and (sess.get("icp_text") or "").strip():
+                st.session_state.icp_text_saved = sess["icp_text"]
+                st.session_state.pending_icp_text = sess["icp_text"]
+            if not st.session_state.inferred_service_line:
+                st.session_state.inferred_service_line = sess.get("service_line") or ""
 
 
-def apply_query(query_id: str) -> None:
-    """Load the most recent fetch for a query (fetch-more context)."""
+def apply_query(query_id: str, *, run_ids: list[str] | None = None) -> None:
+    """
+    Open a search into Results.
+
+    If run_ids is set, load those fetches (merged). Otherwise load all fetches
+    for the search. Empty run list with no fetches → query shell only.
+    """
     st.session_state.composer_open = False
     session = memory.get_query_session(query_id)
     if not session:
@@ -305,13 +356,26 @@ def apply_query(query_id: str) -> None:
     st.session_state.pending_icp_text = st.session_state.icp_text_saved
     if (session.get("label") or "").strip():
         st.session_state.pending_search_name = session["label"]
-    runs = memory.list_runs_for_query(query_id)
-    if runs:
-        loaded = memory.load_run(runs[0]["run_id"])
-        if loaded:
-            apply_run(loaded)
-            return
+    runs_meta = memory.list_runs_for_query(query_id)
+    all_ids = [r["run_id"] for r in runs_meta]
+    if run_ids is not None:
+        wanted = {rid for rid in run_ids if rid}
+        ordered = [rid for rid in all_ids if rid in wanted]
+        # Preserve any selected ids not in list order (shouldn't happen)
+        for rid in run_ids:
+            if rid in wanted and rid not in ordered:
+                ordered.append(rid)
+    else:
+        ordered = list(all_ids)
+    loaded = [memory.load_run(rid) for rid in ordered]
+    loaded = [r for r in loaded if r]
+    if loaded:
+        apply_runs(loaded)
+        return
     st.session_state.leads = []
+    st.session_state.active_run_id = ""
+    st.session_state.active_run_ids = []
+    st.session_state.view_query_ids = [query_id]
     st.session_state.selected = 0
     st.session_state.view_mode = "query"
     st.session_state.view_label = session.get("label") or query_id
@@ -398,12 +462,16 @@ def _fmt_when(iso: str) -> str:
 def _clear_workspace() -> None:
     memory.clear_all_data()
     for key in (
-        "leads", "funnel", "logs", "queries", "active_run_id", "active_query_id",
+        "leads", "funnel", "logs", "queries", "active_run_id", "active_run_ids",
+        "view_query_ids", "active_query_id",
         "csv_path", "icp_text_saved", "inferred_service_line", "selected", "view_label",
         "last_search_mode", "pending_icp_text", "pending_search_name", "rename_search_id",
     ):
         if key in st.session_state:
-            st.session_state[key] = [] if key in {"leads", "logs", "queries"} else ""
+            if key in {"leads", "logs", "queries", "active_run_ids", "view_query_ids"}:
+                st.session_state[key] = []
+            else:
+                st.session_state[key] = ""
     st.session_state.composer_open = False
     st.session_state.hydrated = True
 
@@ -428,95 +496,22 @@ def _enter_workspace() -> None:
     st.session_state.rename_search_id = ""
 
 
+def _enter_signal_desk() -> None:
+    st.session_state.page_view = "news"
+    st.session_state.composer_open = False
+    st.session_state.rename_search_id = ""
+
+
 def _leave_workspace() -> None:
     _clear_ws_selection()
     st.session_state.page_view = "main"
     st.session_state.rename_search_id = ""
-    st.session_state.similar_focus_id = 0
     st.session_state.team_open_id = 0
 
 
 def _browse_local_folder(initial: str = "") -> str | None:
-    """Prefer native OS dialog; otherwise None (UI falls back to in-app browser)."""
+    """Native OS folder dialog when Streamlit is running on this desktop."""
     return tk_pick_folder(initial)
-
-
-def _render_folder_browser() -> None:
-    """In-app navigator over host Documents/Downloads/Desktop + project exports."""
-    roots = browse_roots(ROOT)
-    if not roots:
-        st.caption("No browsable folders mounted. Use Download, or paste a writable path.")
-        return
-
-    root_options = [str(r) for r in roots]
-    root_labels = {str(r): r.name or str(r) for r in roots}
-
-    if "ws_browse_path" not in st.session_state or not str(st.session_state.ws_browse_path).strip():
-        st.session_state.ws_browse_path = root_options[0]
-
-    st.markdown("**Browse folders on this PC**")
-    pick_root = st.selectbox(
-        "Start from",
-        root_options,
-        format_func=lambda p: root_labels.get(p, p),
-        key="ws_browse_root",
-    )
-    prev_root = st.session_state.get("_ws_prev_root_sel")
-    if prev_root is not None and pick_root != prev_root:
-        st.session_state.ws_browse_path = pick_root
-    st.session_state._ws_prev_root_sel = pick_root
-
-    try:
-        current = Path(str(st.session_state.ws_browse_path)).expanduser().resolve()
-    except OSError:
-        current = Path(pick_root)
-        st.session_state.ws_browse_path = str(current)
-
-    # Keep navigation inside allowed roots
-    in_root = False
-    for root in roots:
-        try:
-            current.relative_to(root)
-            in_root = True
-            break
-        except ValueError:
-            if current == root:
-                in_root = True
-                break
-    if not in_root or not current.is_dir():
-        current = Path(pick_root)
-        st.session_state.ws_browse_path = str(current)
-
-    st.code(str(current), language=None)
-    nav1, nav2, nav3 = st.columns([1, 1, 2])
-    with nav1:
-        parent = parent_within_roots(current, roots)
-        if st.button("↑ Up", use_container_width=True, key="ws-browse-up", disabled=parent is None):
-            if parent is not None:
-                st.session_state.ws_browse_path = str(parent)
-                st.rerun()
-    with nav2:
-        if st.button("Use this folder", type="primary", use_container_width=True, key="ws-browse-use"):
-            st.session_state.ws_save_folder = str(current)
-            st.session_state.ws_browse_open = False
-            st.toast(f"Save folder set to {current}")
-            st.rerun()
-    with nav3:
-        if st.button("Close browser", use_container_width=True, key="ws-browse-close"):
-            st.session_state.ws_browse_open = False
-            st.rerun()
-
-    children = list_subfolders(current)
-    if not children:
-        st.caption("No subfolders here — click Use this folder, or go Up.")
-        return
-    st.caption("Open a subfolder:")
-    for i, child in enumerate(children[:80]):
-        if st.button(f"📁 {child.name}", key=f"ws-browse-child-{i}", use_container_width=True):
-            st.session_state.ws_browse_path = str(child)
-            st.rerun()
-    if len(children) > 80:
-        st.caption(f"Showing 80 of {len(children)} folders.")
 
 
 def _build_fetches_zip(run_ids: list[str]) -> bytes:
@@ -583,9 +578,15 @@ def _soft_delete_workspace_selection() -> None:
     if st.session_state.active_query_id in st.session_state.ws_sel_queries:
         st.session_state.active_query_id = ""
         st.session_state.active_run_id = ""
+        st.session_state.active_run_ids = []
+        st.session_state.view_query_ids = []
         st.session_state.leads = []
-    elif st.session_state.active_run_id in st.session_state.ws_sel_runs:
+    elif st.session_state.active_run_id in st.session_state.ws_sel_runs or any(
+        rid in st.session_state.ws_sel_runs for rid in (st.session_state.get("active_run_ids") or [])
+    ):
         st.session_state.active_run_id = ""
+        st.session_state.active_run_ids = []
+        st.session_state.view_query_ids = []
         st.session_state.leads = []
 
 
@@ -665,7 +666,17 @@ def _render_workspace_searches() -> None:
                 b1, b2, b3 = st.columns(3)
                 with b1:
                     if st.button("Open", key=f"ws-open-{qid}", use_container_width=True):
-                        apply_query(qid)
+                        run_ids_for_q = [r["run_id"] for r in runs]
+                        selected_here = [
+                            rid for rid in run_ids_for_q if rid in st.session_state.ws_sel_runs
+                        ]
+                        # Entire-search checkbox → all fetches; else selected rows;
+                        # if nothing checked → all fetches for this search.
+                        if qid in st.session_state.ws_sel_queries or not selected_here:
+                            open_ids = run_ids_for_q
+                        else:
+                            open_ids = selected_here
+                        apply_query(qid, run_ids=open_ids)
                         _leave_workspace()
                         st.rerun()
                 with b2:
@@ -684,6 +695,8 @@ def _render_workspace_searches() -> None:
                         if st.session_state.active_query_id == qid:
                             st.session_state.active_query_id = ""
                             st.session_state.active_run_id = ""
+                            st.session_state.active_run_ids = []
+                            st.session_state.view_query_ids = []
                             st.session_state.leads = []
                         _clear_ws_selection()
                         st.toast("Moved to recycle bin")
@@ -701,10 +714,11 @@ def _render_workspace_searches() -> None:
                 if brief:
                     st.caption(brief if len(brief) <= 160 else brief[:160] + "…")
 
+                st.caption("Select fetches, then Open — or Open with none selected to load every fetch.")
                 for run in runs:
                     rid = run["run_id"]
                     label = _run_label(run)
-                    c1, c2, c3 = st.columns([0.12, 0.58, 0.30])
+                    c1, c2 = st.columns([0.12, 0.88])
                     with c1:
                         sel_r = st.checkbox(
                             "sel",
@@ -718,13 +732,6 @@ def _render_workspace_searches() -> None:
                             st.session_state.ws_sel_runs.discard(rid)
                     with c2:
                         st.caption(f"{label} · {run.get('lead_count', 0)} cos")
-                    with c3:
-                        if st.button("Open fetch", key=f"ws-of-{rid}", use_container_width=True):
-                            loaded = memory.load_run(rid)
-                            if loaded:
-                                apply_run(loaded)
-                                _leave_workspace()
-                                st.rerun()
 
     sel_runs = _selected_run_ids_from_workspace()
     st.markdown("##### Selection")
@@ -746,72 +753,67 @@ def _render_workspace_searches() -> None:
             "ZIP includes full CSV + JSON per fetch: every contact, channels, "
             "and company + person outreach drafts."
         )
-        if "ws_save_folder" not in st.session_state or not str(st.session_state.ws_save_folder).strip():
-            st.session_state.ws_save_folder = default_save_folder(ROOT)
-        if "ws_browse_open" not in st.session_state:
-            st.session_state.ws_browse_open = False
-
         zip_bytes = _build_fetches_zip(sel_runs)
+        zip_name = "frequency_selected_fetches.zip"
 
-        # 1) Browser-native: pick any folder on this PC and write the ZIP there (Chrome/Edge)
-        render_browser_directory_save(
+        # Primary: OS Save As / folder picker (Chrome/Edge Win+Mac) + blob fallback
+        render_save_zip_panel(
             zip_bytes,
-            file_name="frequency_selected_fetches.zip",
+            file_name=zip_name,
+            fetch_count=len(sel_runs),
         )
 
-        # 2) In-app folder browser (works in Docker via /host mounts)
-        b1, b2 = st.columns([1, 1])
-        with b1:
-            if st.button(
-                "Browse folders…",
-                use_container_width=True,
-                key="ws-browse-folder",
-            ):
-                picked = _browse_local_folder(st.session_state.ws_save_folder)
-                if picked:
-                    st.session_state.ws_save_folder = picked
-                    st.session_state.ws_browse_open = False
-                    st.toast(f"Save folder set to {picked}")
-                    st.rerun()
-                st.session_state.ws_browse_open = True
-                st.rerun()
-        with b2:
-            if st.button(
-                f"Save ZIP here ({len(sel_runs)} fetches)",
-                type="primary",
-                use_container_width=True,
-                key="ws-save-folder",
-            ):
-                try:
-                    zip_path = _save_fetches_zip_to_folder(
-                        sel_runs, st.session_state.ws_save_folder
-                    )
-                    _clear_ws_selection()
-                    st.toast(f"Saved {zip_path.name} → {zip_path.parent}")
-                    st.rerun()
-                except OSError as exc:
-                    st.error(f"Could not save: {exc}")
-
-        if st.session_state.ws_browse_open:
-            _render_folder_browser()
-
-        folder = st.text_input(
-            "Save ZIP to this folder",
-            key="ws_save_folder",
-            help="Set via Browse folders, or paste a path. Docker: use Documents / Downloads / Desktop.",
-        )
-        st.caption(f"Current save folder: `{folder}`")
-
-        # 3) Simple browser download (Downloads folder / save-as)
         st.download_button(
-            f"Download ({len(sel_runs)} fetches)",
+            f"Download ZIP ({len(sel_runs)} fetches)",
             zip_bytes,
-            file_name="frequency_selected_fetches.zip",
+            file_name=zip_name,
             mime="application/zip",
             use_container_width=True,
             key="ws-zip",
-            help="Simple browser download of the same full ZIP.",
+            help="Works in every browser (Safari, Firefox, Chrome, Edge). Uses your normal download / Save As dialog.",
         )
+
+        with st.expander("Advanced: save onto the server / Docker host mounts", expanded=False):
+            st.caption(
+                "Writes the ZIP on the machine running this app (e.g. local Python, "
+                "or Docker mounts under Documents / Downloads / Desktop). "
+                "Most users should use Save ZIP / Download above instead."
+            )
+            if "ws_save_folder" not in st.session_state or not str(st.session_state.ws_save_folder).strip():
+                st.session_state.ws_save_folder = default_save_folder(ROOT)
+            roots = browse_roots(ROOT)
+            if roots:
+                st.caption("Suggested folders: " + " · ".join(r.name for r in roots[:4]))
+            a1, a2 = st.columns([1, 1])
+            with a1:
+                if st.button("Pick folder (desktop app only)", use_container_width=True, key="ws-adv-tk"):
+                    picked = _browse_local_folder(st.session_state.ws_save_folder)
+                    if picked:
+                        st.session_state.ws_save_folder = picked
+                        st.toast(f"Save folder set to {picked}")
+                        st.rerun()
+                    else:
+                        st.info("No desktop folder dialog here — paste a path below.")
+            with a2:
+                if st.button(
+                    f"Write ZIP to path ({len(sel_runs)} fetches)",
+                    type="primary",
+                    use_container_width=True,
+                    key="ws-adv-save",
+                ):
+                    try:
+                        zip_path = _save_fetches_zip_to_folder(
+                            sel_runs, st.session_state.ws_save_folder
+                        )
+                        st.toast(f"Saved {zip_path.name} → {zip_path.parent}")
+                        st.rerun()
+                    except OSError as exc:
+                        st.error(f"Could not save: {exc}")
+            st.text_input(
+                "Server folder path",
+                key="ws_save_folder",
+                help="Absolute path on the server / container, e.g. /host/Documents",
+            )
 
         if st.button(
             "Move selected to recycle bin",
@@ -1107,25 +1109,6 @@ if st.session_state.page_view == "settings":
     render_settings_page(_owner_email, accounts=accounts)
     st.stop()
 
-if st.session_state.page_view == "repo":
-    top_l, top_mid, top_r = st.columns([0.55, 0.22, 0.23], gap="small")
-    with top_l:
-        st.markdown(topbar_html(), unsafe_allow_html=True)
-        st.markdown('<p class="fx-page-kicker">Team repo</p>', unsafe_allow_html=True)
-    with top_mid:
-        if st.button(_theme_button_label(), use_container_width=True, key="btn-theme-repo"):
-            _toggle_theme()
-            st.rerun()
-    with top_r:
-        if st.button("← Back to search", use_container_width=True, key="btn-leave-repo"):
-            st.session_state.page_view = "main"
-            st.rerun()
-    _profiles = {
-        (p.get("email") or "").strip().lower(): p for p in accounts.list_profiles()
-    }
-    render_central_repo(memory=memory, owner_email=_owner_email, profiles=_profiles)
-    st.stop()
-
 if st.session_state.page_view == "workspace":
     top_l, top_mid, top_r = st.columns([0.55, 0.22, 0.23], gap="small")
     with top_l:
@@ -1142,8 +1125,30 @@ if st.session_state.page_view == "workspace":
     _render_workspace_page()
     st.stop()
 
+if st.session_state.page_view == "news":
+    top_l, top_mid, top_r = st.columns([0.55, 0.22, 0.23], gap="small")
+    with top_l:
+        st.markdown(topbar_html(), unsafe_allow_html=True)
+        st.markdown('<p class="fx-page-kicker">Signal desk</p>', unsafe_allow_html=True)
+    with top_mid:
+        if st.button(_theme_button_label(), use_container_width=True, key="btn-theme-news"):
+            _toggle_theme()
+            st.rerun()
+    with top_r:
+        if st.button("← Back to search", use_container_width=True, key="btn-leave-news"):
+            st.session_state.page_view = "main"
+            st.rerun()
+    render_signal_desk_page(
+        owner_email=_owner_email,
+        memory=memory,
+        accounts=accounts,
+        is_admin=_is_admin,
+        openai_key=openai_key,
+    )
+    st.stop()
+
 nav_cols = st.columns(
-    [0.28, 0.12, 0.10, 0.12, 0.12, 0.12, 0.14] if _is_admin else [0.34, 0.14, 0.12, 0.14, 0.13, 0.13],
+    [0.24, 0.13, 0.13, 0.10, 0.13, 0.12, 0.15] if _is_admin else [0.30, 0.15, 0.16, 0.12, 0.14, 0.13],
     gap="small",
 )
 with nav_cols[0]:
@@ -1154,16 +1159,16 @@ with nav_cols[1]:
         st.session_state.rename_search_id = ""
         st.rerun()
 with nav_cols[2]:
+    if st.button("Signal desk", use_container_width=True, key="btn-open-news"):
+        _enter_signal_desk()
+        st.rerun()
+with nav_cols[3]:
     if st.button(_theme_button_label(), use_container_width=True, key="btn-theme-main"):
         _toggle_theme()
         st.rerun()
-with nav_cols[3]:
+with nav_cols[4]:
     if st.button("Workspace", use_container_width=True, key="btn-open-workspace"):
         _enter_workspace()
-        st.rerun()
-with nav_cols[4]:
-    if st.button("Repo", use_container_width=True, key="btn-open-repo"):
-        st.session_state.page_view = "repo"
         st.rerun()
 with nav_cols[5]:
     if st.button("Profile", use_container_width=True, key="btn-open-settings"):
@@ -1193,6 +1198,8 @@ if active_qs and (active_qs.get("deleted_at") or "").strip():
     active_qs = None
     st.session_state.active_query_id = ""
     st.session_state.active_run_id = ""
+    st.session_state.active_run_ids = []
+    st.session_state.view_query_ids = []
     st.session_state.leads = []
 
 locked_brief = ((active_qs or {}).get("icp_text") or st.session_state.icp_text_saved or "").strip()
@@ -1253,31 +1260,50 @@ if st.session_state.composer_open:
 
 # ── Current search workspace ──
 elif active_qs or st.session_state.leads:
+    n_fetches = len(st.session_state.get("active_run_ids") or []) or (
+        1 if st.session_state.active_run_id else 0
+    )
+    fetch_bit = ""
+    if n_fetches > 1:
+        fetch_bit = f" · {n_fetches} fetches"
+    elif st.session_state.active_run_id:
+        fetch_bit = f' · <code>{html.escape(st.session_state.active_run_id)}</code>'
     st.markdown(
         f'<div class="fx-bar"><span><strong>{html.escape(active_search_name or "Current search")}</strong>'
         f'{" · " + html.escape(service_line_label(st.session_state.inferred_service_line)) if st.session_state.inferred_service_line else ""}'
         f' · {len(st.session_state.leads)} companies'
-        f'{" · <code>" + html.escape(st.session_state.active_run_id) + "</code>" if st.session_state.active_run_id else ""}'
+        f"{fetch_bit}"
         f"</span></div>",
         unsafe_allow_html=True,
     )
     with st.expander("ICP for this search", expanded=False):
         st.write(locked_brief or "—")
 
-    can_fetch = bool(st.session_state.active_query_id and locked_brief)
+    can_fetch, fetch_block_reason = fetch_more_guard(
+        active_query_id=st.session_state.active_query_id or "",
+        locked_brief=locked_brief or "",
+        query_ids_in_view=list(st.session_state.get("view_query_ids") or []),
+    )
     fetch_more = st.button(
         "Fetch more →",
         type="primary",
         use_container_width=True,
         disabled=not can_fetch,
-        help="Find more companies for this same search (skips ones already found).",
+        help=(
+            fetch_block_reason
+            if not can_fetch
+            else "Find more companies for this same search (skips ones already found)."
+        ),
         key="btn-fetch-more",
     )
+    if not can_fetch and fetch_block_reason and (st.session_state.leads or active_qs):
+        if "single search" in fetch_block_reason.lower() or "different search" in fetch_block_reason.lower():
+            st.caption(fetch_block_reason)
     if fetch_more:
         if not openai_key:
             st.error("Cannot run without OPENAI_API_KEY on the server (`.env`).")
         elif not can_fetch:
-            st.error("Open or create a search first.")
+            st.error(fetch_block_reason or "Open or create a search first.")
         else:
             _execute_agent(
                 icp_text=locked_brief,
@@ -1316,7 +1342,7 @@ def enqueue_lead(lead: dict, include_linkedin: bool = True) -> tuple[bool, str]:
     payload = company_queue_payload(lead, search_name=search_name, icp_text=icp_text)
     qid = memory.enqueue_send(payload)
     lead["outreach_status"] = "queued"
-    pipe = memory.upsert_pipeline_from_lead(
+    memory.upsert_pipeline_from_lead(
         lead,
         send_queue_id=qid,
         query_id=query_id,
@@ -1324,13 +1350,8 @@ def enqueue_lead(lead: dict, include_linkedin: bool = True) -> tuple[bool, str]:
         search_name=search_name,
         channel="company",
     )
-    similar = []
-    if pipe.get("id"):
-        similar = memory.find_similar_pipeline(pipeline_id=int(pipe["id"]))
     n_msg = len(payload.get("bundle", {}).get("selected_messages") or selected_messages(lead))
     note = f"Queued {lead.get('name') or 'company'} · {n_msg} selected message(s) · dry run only"
-    if similar:
-        note += f" · {len(similar)} similar already in team pipeline"
     return True, note
 
 
@@ -1487,7 +1508,6 @@ with review_tab:
                     st.write("· " + line)
         with right:
             lead = leads[idx]
-            render_results_similarity(memory, lead, owner_email=_owner_email)
 
             a, b, c, d = st.columns(4)
             if a.button("Approve", use_container_width=True, type="primary"):
@@ -1612,7 +1632,7 @@ with send_tab:
         st.markdown(
             empty_state_html(
                 "Nothing in your queue yet",
-                "Select messages on a result and Queue selected — similar matches do not block you.",
+                "Select messages on a result and Queue selected to add a company here.",
             ),
             unsafe_allow_html=True,
         )
