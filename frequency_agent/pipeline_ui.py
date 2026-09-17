@@ -16,6 +16,7 @@ from .similarity import (
     require_comment,
     status_label,
 )
+from .news_deep import NEWS_EVENT_TAG, is_news_event_item
 from .ui import empty_state_html
 
 
@@ -82,6 +83,13 @@ def pipeline_card_html(
     comment = _clip(item.get("comment") or "", 140)
     owner = item.get("owner_email") or ""
     owner_line = f'<p class="fx-pipe-meta">Owner · {_esc(owner)}</p>' if show_owner else ""
+    news = is_news_event_item(item)
+    card_cls = "fx-pipe-card fx-pipe-news-event" if news else "fx-pipe-card"
+    tag = (
+        f'<span class="badge news-event">{_esc(NEWS_EVENT_TAG)}</span>'
+        if news
+        else ""
+    )
     signal_line = (
         f'<p class="fx-pipe-meta">Signal · {_esc(_clip(signal_text, 140))}</p>'
         if (signal_text or "").strip()
@@ -93,9 +101,10 @@ def pipeline_card_html(
         else f'<p class="fx-pipe-person">{_esc(person)}{" · " + _esc(domain) if domain else ""}</p>'
     )
     return f"""
-<div class="fx-pipe-card">
+<div class="{card_cls}">
   <div class="fx-pipe-top">
     <p class="fx-kicker">{_esc(status_label(status))}</p>
+    {tag}
   </div>
   <h3>{_esc(company)}</h3>
   {contacts_block}

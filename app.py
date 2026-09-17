@@ -44,6 +44,9 @@ from frequency_agent import news_sources as news_sources_mod
 from frequency_agent import news_store as news_store_mod
 from frequency_agent import news_desk as news_desk_mod
 from frequency_agent import news_ui as news_ui_mod
+from frequency_agent import news_lists as news_lists_mod
+from frequency_agent import news_deep as news_deep_mod
+from frequency_agent import lists_ui as lists_ui_mod
 
 importlib.reload(schemas_mod)
 importlib.reload(channels_mod)
@@ -66,8 +69,11 @@ importlib.reload(news_relevance_mod)
 importlib.reload(news_sources_mod)
 importlib.reload(news_store_mod)
 importlib.reload(news_desk_mod)
+importlib.reload(news_lists_mod)
+importlib.reload(news_deep_mod)
+importlib.reload(lists_ui_mod)
 importlib.reload(news_ui_mod)
-# Do not reload news_eval — Check-relevance worker threads must stay process-stable.
+# Do not reload news_eval — leftover worker module; keep process-stable if imported elsewhere.
 importlib.reload(graph_mod)
 importlib.reload(mailer_mod)
 importlib.reload(clerk_client_mod)
@@ -84,6 +90,7 @@ from frequency_agent.icp import service_line_label
 from frequency_agent.memory import Memory, format_fetch_label, resolve_search_name
 from frequency_agent.workspace_view import fetch_more_guard, merge_run_payloads
 from frequency_agent.news_ui import render_signal_desk_page
+from frequency_agent.lists_ui import render_workspace_lists
 from frequency_agent.auth_ui import current_user, render_account_chip, require_login
 from frequency_agent.accounts import get_account_store
 from frequency_agent.admin_ui import render_admin_page
@@ -599,7 +606,7 @@ def _render_workspace_page() -> None:
 <div class="fx-panel-hero">
   <p class="fx-kicker">Workspace</p>
   <h2>{_owner_email}</h2>
-  <p>Your searches stay private. Pipeline status and the team board are shared so everyone can see who is handling which company.</p>
+    <p>Your searches and news lists stay private. Pipeline status and the team board are shared so everyone can see who is handling which company.</p>
 </div>
 """,
         unsafe_allow_html=True,
@@ -612,9 +619,10 @@ def _render_workspace_page() -> None:
         st.session_state.ws_section = "team"
     section = st.radio(
         "Workspace section",
-        ["searches", "pipeline", "team"],
+        ["searches", "lists", "pipeline", "team"],
         format_func=lambda s: {
             "searches": "Searches",
+            "lists": "Lists",
             "pipeline": "My pipeline",
             "team": "Team board",
         }[s],
@@ -634,6 +642,14 @@ def _render_workspace_page() -> None:
             owner_email=_owner_email,
             is_admin=_is_admin,
             profiles=profiles,
+        )
+        return
+    if section == "lists":
+        render_workspace_lists(
+            memory=memory,
+            owner_email=_owner_email,
+            openai_key=openai_key,
+            tavily_key=tavily_key,
         )
         return
     _render_workspace_searches()

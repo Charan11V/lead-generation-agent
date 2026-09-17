@@ -11,7 +11,7 @@ from .accounts import AccountStore
 from .icp import service_line_label as icp_service_label
 from .memory import Memory
 from .news_desk import run_signal_scan
-from .news_eval import inflight_ids, is_running, reclaim_stale, start_eval
+from .news_lists import NewsListStore
 from .news_relevance import (
     SERVICE_CAP,
     SERVICE_EXEC,
@@ -84,7 +84,7 @@ def desk_hero_html() -> str:
 <div class="fx-desk-hero">
   <p class="fx-kicker">Signal desk</p>
   <h2>What Frequency should see <em>today</em></h2>
-  <p>A wide 24-hour sweep of public news, ranked by Frequency’s mandate — funding, CXO moves, hiring, expansion, capital. Nothing is sent to OpenAI until you press <em>Check relevance</em> on a story.</p>
+  <p>A wide 24-hour sweep of public news, ranked by Frequency’s mandate — funding, CXO moves, hiring, expansion, capital. Add stories to a Workspace list when you want to keep them together.</p>
 </div>
 """
 
@@ -154,12 +154,37 @@ def news_card_html(item: dict, *, rank: int = 0) -> str:
 """
 
 
+def lists_membership_html(lists: list[dict] | None) -> str:
+    """Show which Workspace lists already contain this story (Signal Desk cards)."""
+    names = [
+        (entry.get("name") or "").strip() or "Untitled"
+        for entry in (lists or [])
+        if isinstance(entry, dict)
+    ]
+    if not names:
+        return (
+            '<div class="fx-news-lists fx-news-lists-empty">'
+            '<span class="fx-news-lists-label">Lists</span>'
+            '<span class="fx-news-lists-none">Not on any list yet</span>'
+            "</div>"
+        )
+    chips = "".join(
+        f'<span class="fx-news-list-chip">{_esc(name)}</span>' for name in names
+    )
+    return (
+        '<div class="fx-news-lists">'
+        '<span class="fx-news-lists-label">On lists</span>'
+        f'<div class="fx-news-lists-chips">{chips}</div>'
+        "</div>"
+    )
+
+
 def empty_desk_html() -> str:
     return """
 <div class="fx-desk-empty">
   <p class="fx-kicker">Quiet so far</p>
   <h3>Nothing on the desk yet</h3>
-  <p>Press <strong>Scan last 24 hours</strong>. Stories arrive ranked best to worst. Check relevance on a story only when you want a verdict.</p>
+  <p>Press <strong>Scan last 24 hours</strong>. Stories arrive ranked best to worst. Create or select a list in Workspace, then add stories here.</p>
 </div>
 """
 
@@ -177,8 +202,12 @@ def _ensure_news_state() -> None:
         st.session_state.news_notice = ""
     if "news_last_added" not in st.session_state:
         st.session_state.news_last_added = 0
-    if "_news_eval_watch" not in st.session_state:
-        st.session_state._news_eval_watch = []
+    if "news_active_list_id" not in st.session_state:
+        st.session_state.news_active_list_id = ""
+    if "news_recycle_sel" not in st.session_state:
+        st.session_state.news_recycle_sel = set()
+    if "news_recycle_sel_nonce" not in st.session_state:
+        st.session_state.news_recycle_sel_nonce = 0
 
 
 def _clear_news_selection() -> None:
@@ -186,6 +215,16 @@ def _clear_news_selection() -> None:
     st.session_state.news_sel_nonce = int(st.session_state.get("news_sel_nonce") or 0) + 1
     for key in list(st.session_state.keys()):
         if isinstance(key, str) and key.startswith("news-sel-"):
+            del st.session_state[key]
+
+
+def _clear_recycle_selection() -> None:
+    st.session_state.news_recycle_sel = set()
+    st.session_state.news_recycle_sel_nonce = int(
+        st.session_state.get("news_recycle_sel_nonce") or 0
+    ) + 1
+    for key in list(st.session_state.keys()):
+        if isinstance(key, str) and key.startswith("news-rsel-"):
             del st.session_state[key]
 
 
@@ -202,16 +241,16 @@ def render_signal_desk_page(
     memory: Memory,
     accounts: AccountStore,
     is_admin: bool,
-    openai_key: str,
+    openai_key: str = "",
 ) -> None:
     _ensure_news_state()
     store = NewsStore(memory.path, owner_email=owner_email)
-    reclaim_stale(store)
-    st.session_state._news_eval_path = str(memory.path)
-    st.session_state._news_eval_owner = owner_email
+    list_store = NewsListStore(memory.path, owner_email=owner_email)
     st.markdown(desk_hero_html(), unsafe_allow_html=True)
-    if st.session_state.get("_news_eval_watch") or inflight_ids():
-        _news_eval_poller()
+
+    if st.session_state.get("news_view_mode") == "recycle":
+        _render_recycle_bin(store)
+        return
 
     scan_col, range_col = st.columns([0.46, 0.54], gap="large")
     with scan_col:
@@ -219,8 +258,7 @@ def render_signal_desk_page(
             '<div class="fx-desk-panel"><p class="fx-desk-panel-kicker">Live sweep</p>'
             "<h3>Scan the last 24 hours</h3>"
             "<p>Pulls free news APIs and publisher feeds, then ranks every usable story "
-            "best to worst. A second press today adds new items beside the ones already saved. "
-            "OpenAI is not used until you check a story.</p></div>",
+            "best to worst. A second press today adds new items beside the ones already saved.</p></div>",
             unsafe_allow_html=True,
         )
         if st.button("Scan last 24 hours", type="primary", use_container_width=True, key="news-scan"):
@@ -328,8 +366,10 @@ def render_signal_desk_page(
         unsafe_allow_html=True,
     )
 
+    _render_list_picker(list_store)
     _render_delete_bar(
         store,
+        list_store,
         items,
         is_admin=is_admin,
         start_d=start_d,
@@ -341,8 +381,14 @@ def render_signal_desk_page(
         st.markdown(empty_desk_html(), unsafe_allow_html=True)
     else:
         nonce = int(st.session_state.get("news_sel_nonce") or 0)
+        active_list = (st.session_state.get("news_active_list_id") or "").strip()
+        membership = list_store.lists_containing_news(
+            [(i.get("news_id") or "").strip() for i in items if (i.get("news_id") or "").strip()]
+        )
         for idx, item in enumerate(items, start=1):
             nid = item.get("news_id") or ""
+            on_lists = membership.get(nid) or []
+            on_active = any((x.get("list_id") or "") == active_list for x in on_lists)
             c_sel, c_card = st.columns([0.06, 0.94], gap="small")
             with c_sel:
                 checked = st.checkbox(
@@ -357,158 +403,106 @@ def render_signal_desk_page(
                     st.session_state.news_sel.discard(nid)
             with c_card:
                 st.markdown(news_card_html(item, rank=idx), unsafe_allow_html=True)
-                _render_eval_controls(
-                    store,
-                    item,
-                    openai_key=openai_key,
-                    owner_email=owner_email,
-                )
+                st.html(lists_membership_html(on_lists))
+                if nid and active_list:
+                    if on_active:
+                        st.caption("Already on the selected list.")
+                    if st.button(
+                        "Already on selected list" if on_active else "Add to selected list",
+                        key=f"news-add-one-{nid}",
+                        use_container_width=True,
+                        disabled=on_active,
+                    ):
+                        n = list_store.add_items(active_list, [nid])
+                        meta = list_store.get_list(active_list)
+                        name = (meta or {}).get("name") or "list"
+                        if n:
+                            st.session_state.news_notice = f"Added to “{name}”."
+                        else:
+                            st.session_state.news_notice = f"Already on “{name}”."
+                        st.rerun()
 
-    _render_recycle(store)
-    if is_admin:
-        st.caption("Admin: Delete forever removes stories from this account permanently.")
-
-
-def _eval_label(item: dict) -> str:
-    if item.get("eval_relevant") is True:
-        return "Relevant"
-    if item.get("eval_relevant") is False:
-        return "Not relevant"
-    status = (item.get("eval_status") or "").strip()
-    if status == "relevant":
-        return "Relevant"
-    if status == "not_relevant":
-        return "Not relevant"
-    return ""
+    # Recycle bin is a full view (opened from the actions bar).
 
 
-def _is_eval_running(item: dict) -> bool:
-    nid = (item.get("news_id") or "").strip()
-    if nid and is_running(nid):
-        return True
-    return (item.get("eval_status") or "").strip() == "running"
-
-
-def _is_evaluated(item: dict) -> bool:
-    if _is_eval_running(item):
-        return False
-    status = (item.get("eval_status") or "").strip()
-    return status in {"relevant", "not_relevant"}
-
-
-def _watch_eval(news_id: str) -> None:
-    nid = (news_id or "").strip()
-    watched = [i for i in (st.session_state.get("_news_eval_watch") or []) if i]
-    if nid and nid not in watched:
-        watched.append(nid)
-    for live in inflight_ids():
-        if live not in watched:
-            watched.append(live)
-    st.session_state._news_eval_watch = watched
-
-
-def _render_eval_spinner() -> None:
-    st.markdown(
-        '<div class="fx-eval-row"><span class="fx-eval-spin" aria-hidden="true"></span>'
-        '<span class="fx-eval-busy">Evaluating relevance…</span></div>',
-        unsafe_allow_html=True,
+def _render_list_picker(list_store: NewsListStore) -> None:
+    lists = list_store.list_lists()
+    st.markdown("##### Add to list")
+    st.caption("Create / select a list in Workspace → Lists to use a list.")
+    options = [""] + [l["list_id"] for l in lists]
+    labels = {
+        "": "Select a list…",
+        **{l["list_id"]: l.get("name") or "Untitled" for l in lists},
+    }
+    current = st.session_state.get("news_active_list_id") or ""
+    if current not in options:
+        current = ""
+        st.session_state.news_active_list_id = ""
+    pick = st.selectbox(
+        "List",
+        options,
+        index=options.index(current) if current in options else 0,
+        format_func=lambda lid: labels.get(lid, lid),
+        key="news-list-pick",
+        label_visibility="collapsed",
     )
-
-
-def _render_eval_controls(
-    store: NewsStore,
-    item: dict,
-    *,
-    openai_key: str,
-    owner_email: str,
-) -> None:
-    nid = (item.get("news_id") or "").strip()
-    if not nid:
-        return
-    running = _is_eval_running(item)
-    evaluated = _is_evaluated(item)
-    label = _eval_label(item)
-
-    if running:
-        _render_eval_spinner()
-        st.caption("Running in the background — you can check other stories now.")
-        return
-
-    left, mid, right = st.columns([0.28, 0.28, 0.44], gap="small")
-    with left:
-        if not evaluated:
-            if st.button("Check relevance", use_container_width=True, key=f"news-eval-{nid}"):
-                start_eval(
-                    news_id=nid,
-                    owner_email=owner_email,
-                    db_path=store.path,
-                    openai_key=openai_key,
-                    item=item,
-                )
-                _watch_eval(nid)
-                st.rerun()
-        else:
-            tone = "ok" if "Not" not in label else "no"
-            st.markdown(
-                f'<p class="fx-eval-verdict {tone}">{_esc(label)}</p>',
-                unsafe_allow_html=True,
-            )
-    with mid:
-        if evaluated:
-            with st.popover("ⓘ", key=f"news-why-{nid}"):
-                st.markdown("**Why this verdict**")
-                st.write(item.get("eval_why") or "No explanation stored.")
-    with right:
-        if not evaluated:
-            st.caption("Optional — uses OpenAI only for this story.")
-
-
-@st.fragment(run_every=1)
-def _news_eval_poller() -> None:
-    """Refresh the desk when background relevance checks finish."""
-    watched = [i for i in (st.session_state.get("_news_eval_watch") or []) if i]
-    live = inflight_ids()
-    combined = list(dict.fromkeys([*watched, *live]))
-    if not combined:
-        return
-    path = (st.session_state.get("_news_eval_path") or "").strip()
-    owner = (st.session_state.get("_news_eval_owner") or "").strip()
-    if not path or not owner:
-        return
-    store = NewsStore(path, owner_email=owner)
-    reclaim_stale(store)
-    still: list[str] = []
-    for nid in combined:
-        if is_running(nid):
-            still.append(nid)
-            continue
-        row = store.get_item(nid)
-        if row and (row.get("eval_status") or "").strip() == "running":
-            still.append(nid)
-    prev = list(st.session_state.get("_news_eval_watch") or [])
-    st.session_state._news_eval_watch = still
-    if still != prev:
-        st.rerun()
+    if pick != st.session_state.news_active_list_id:
+        st.session_state.news_active_list_id = pick
+    if not lists:
+        st.caption("No lists yet — open Workspace → Lists to create one.")
+    elif pick:
+        meta = list_store.get_list(pick)
+        if meta and (meta.get("description") or "").strip():
+            st.caption(meta["description"])
 
 
 def _render_delete_bar(
     store: NewsStore,
+    list_store: NewsListStore,
     items: list[dict],
     *,
-    is_admin: bool,
+    is_admin: bool = False,
     start_d: date,
     end_d: date,
     view_mode: str,
 ) -> None:
     selected = [nid for nid in (st.session_state.get("news_sel") or set()) if nid]
+    active_list = (st.session_state.get("news_active_list_id") or "").strip()
     st.markdown('<div class="fx-desk-actions">', unsafe_allow_html=True)
-    a1, a2, a3, a4 = st.columns([0.24, 0.24, 0.28, 0.24])
+    a1, a2, a3, a4, a5 = st.columns([0.18, 0.22, 0.22, 0.20, 0.18])
     with a1:
-        if st.button("Select all shown", use_container_width=True, key="news-sel-all"):
-            st.session_state.news_sel = {i.get("news_id") for i in items if i.get("news_id")}
+        shown_ids = {i.get("news_id") for i in items if i.get("news_id")}
+        all_selected = bool(shown_ids) and shown_ids.issubset(st.session_state.news_sel or set())
+        if st.button(
+            "Select/ Deselect All",
+            use_container_width=True,
+            key="news-sel-all",
+            disabled=not shown_ids,
+        ):
+            if all_selected:
+                st.session_state.news_sel -= shown_ids
+            else:
+                st.session_state.news_sel = set(st.session_state.news_sel or set()) | shown_ids
             st.session_state.news_sel_nonce = int(st.session_state.news_sel_nonce or 0) + 1
             st.rerun()
     with a2:
+        if st.button(
+            f"Add selected to list ({len(selected)})",
+            use_container_width=True,
+            key="news-add-sel",
+            disabled=not selected or not active_list,
+            type="primary",
+        ):
+            n = list_store.add_items(active_list, selected)
+            meta = list_store.get_list(active_list)
+            name = (meta or {}).get("name") or "list"
+            st.session_state.news_notice = (
+                f"Added {n} stor{'y' if n == 1 else 'ies'} to “{name}”."
+                if n
+                else f"Selected stories were already on “{name}”."
+            )
+            st.rerun()
+    with a3:
         if st.button(
             f"Delete selected ({len(selected)})",
             use_container_width=True,
@@ -516,10 +510,10 @@ def _render_delete_bar(
             disabled=not selected,
         ):
             n = store.soft_delete(selected)
-            st.session_state.news_notice = f"Removed {n} stor{'y' if n == 1 else 'ies'} from your desk."
+            st.session_state.news_notice = f"Moved {n} stor{'y' if n == 1 else 'ies'} to Recycle bin."
             _clear_news_selection()
             st.rerun()
-    with a3:
+    with a4:
         range_label = (
             "Delete saved in dates"
             if view_mode == "range"
@@ -532,54 +526,121 @@ def _render_delete_bar(
                 ids = store.ids_in_range(_day_start(start_d), _day_end(end_d))
                 n = store.soft_delete(ids)
                 st.session_state.news_notice = (
-                    f"Removed {n} saved stor{'y' if n == 1 else 'ies'} "
-                    f"from {start_d.isoformat()} to {end_d.isoformat()}."
+                    f"Moved {n} saved stor{'y' if n == 1 else 'ies'} to Recycle bin "
+                    f"({start_d.isoformat()} → {end_d.isoformat()})."
                 )
                 _clear_news_selection()
             st.rerun()
-    with a4:
-        if is_admin:
-            if st.button(
-                "Delete forever",
-                use_container_width=True,
-                key="news-del-perm",
-                disabled=not selected,
-            ):
-                n = store.permanently_delete(selected)
-                st.session_state.news_notice = f"Permanently deleted {n} stor{'y' if n == 1 else 'ies'}."
-                _clear_news_selection()
-                st.rerun()
-        else:
-            if st.button("Clear ticks", use_container_width=True, key="news-clear-ticks"):
-                _clear_news_selection()
-                st.rerun()
+    with a5:
+        deleted_n = len(store.list_deleted(limit=500))
+        if st.button(
+            f"Recycle bin ({deleted_n})",
+            use_container_width=True,
+            key="news-open-recycle",
+        ):
+            st.session_state.news_view_mode = "recycle"
+            _clear_recycle_selection()
+            st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
     st.caption(
-        "Delete selected removes ticked stories from your account. "
-        "Delete in dates removes every saved story in the From–To range — still only yours. "
-        + ("Admins can also delete forever." if is_admin else "")
+        "Select a list above, tick stories, then Add selected to list. "
+        "Delete selected moves stories to the Recycle bin. Open Recycle bin to restore or delete forever."
     )
 
 
-def _render_recycle(store: NewsStore) -> None:
-    deleted = store.list_deleted(limit=40)
+def _render_recycle_bin(store: NewsStore) -> None:
+    deleted = store.list_deleted(limit=200)
+    st.markdown("##### Recycle bin")
+    st.caption(
+        "Stories removed from your desk. Restore puts them back. "
+        "Delete forever removes them permanently from this account."
+    )
+    top1, top2 = st.columns([0.3, 0.7])
+    with top1:
+        if st.button("← Back to desk", use_container_width=True, key="news-leave-recycle"):
+            st.session_state.news_view_mode = "window"
+            _clear_recycle_selection()
+            st.rerun()
+
+    notice = (st.session_state.get("news_notice") or "").strip()
+    if notice:
+        st.markdown(f'<div class="fx-desk-banner">{html.escape(notice)}</div>', unsafe_allow_html=True)
+
     if not deleted:
+        st.info("Recycle bin is empty.")
         return
-    with st.expander(f"Removed from your desk · {len(deleted)}", expanded=False):
-        st.caption("Hidden on your account only. Restore brings them back. Admins can still wipe them forever.")
-        for item in deleted:
-            nid = item.get("news_id") or ""
-            c1, c2 = st.columns([0.78, 0.22])
-            with c1:
-                st.markdown(
-                    f"**{_esc(item.get('title') or 'Untitled')}**  \n"
-                    f"{_esc(item.get('source') or '')} · removed {_esc(_ago(item.get('deleted_at')))}"
+
+    selected = [nid for nid in (st.session_state.get("news_recycle_sel") or set()) if nid]
+    b1, b2, b3, b4 = st.columns([0.25, 0.25, 0.25, 0.25])
+    with b1:
+        shown_ids = {i.get("news_id") for i in deleted if i.get("news_id")}
+        all_selected = bool(shown_ids) and shown_ids.issubset(
+            st.session_state.news_recycle_sel or set()
+        )
+        if st.button(
+            "Select/ Deselect All",
+            use_container_width=True,
+            key="news-rsel-all",
+            disabled=not shown_ids,
+        ):
+            if all_selected:
+                st.session_state.news_recycle_sel -= shown_ids
+            else:
+                st.session_state.news_recycle_sel = (
+                    set(st.session_state.news_recycle_sel or set()) | shown_ids
                 )
-            with c2:
-                if st.button("Restore", key=f"news-restore-{nid}", use_container_width=True):
-                    store.restore([nid])
-                    st.session_state.news_notice = "Restored to your desk."
-                    st.rerun()
+            st.session_state.news_recycle_sel_nonce = int(
+                st.session_state.get("news_recycle_sel_nonce") or 0
+            ) + 1
+            st.rerun()
+    with b2:
+        if st.button("Clear ticks", use_container_width=True, key="news-rsel-clear"):
+            _clear_recycle_selection()
+            st.rerun()
+    with b3:
+        if st.button(
+            f"Restore ({len(selected)})",
+            use_container_width=True,
+            key="news-restore-sel",
+            disabled=not selected,
+            type="primary",
+        ):
+            n = store.restore(selected)
+            st.session_state.news_notice = f"Restored {n} stor{'y' if n == 1 else 'ies'} to your desk."
+            _clear_recycle_selection()
+            st.rerun()
+    with b4:
+        if st.button(
+            f"Delete forever ({len(selected)})",
+            use_container_width=True,
+            key="news-perm-sel",
+            disabled=not selected,
+            type="secondary",
+        ):
+            n = store.permanently_delete(selected)
+            st.session_state.news_notice = f"Permanently deleted {n} stor{'y' if n == 1 else 'ies'}."
+            _clear_recycle_selection()
+            st.rerun()
+
+    st.caption(f"{len(deleted)} in recycle bin · {len(selected)} selected")
+    nonce = int(st.session_state.get("news_recycle_sel_nonce") or 0)
+    for idx, item in enumerate(deleted, start=1):
+        nid = item.get("news_id") or ""
+        c_sel, c_card = st.columns([0.06, 0.94], gap="small")
+        with c_sel:
+            checked = st.checkbox(
+                "Select",
+                value=nid in st.session_state.news_recycle_sel,
+                key=f"news-rsel-{nonce}-{nid}",
+                label_visibility="collapsed",
+            )
+            if checked:
+                st.session_state.news_recycle_sel.add(nid)
+            else:
+                st.session_state.news_recycle_sel.discard(nid)
+        with c_card:
+            st.markdown(news_card_html(item, rank=idx), unsafe_allow_html=True)
+            st.caption(f"Removed {_ago(item.get('deleted_at')) or '—'}")
 
 
 def render_admin_signal_panel(*, memory: Memory, viewer_email: str = "") -> None:

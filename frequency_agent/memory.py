@@ -1825,6 +1825,10 @@ class Memory:
                     conn.execute("DELETE FROM news_items WHERE owner_email = ?", (owner,))
                 if "news_scans" in news_tables:
                     conn.execute("DELETE FROM news_scans WHERE owner_email = ?", (owner,))
+                if "news_list_items" in news_tables:
+                    conn.execute("DELETE FROM news_list_items WHERE owner_email = ?", (owner,))
+                if "news_lists" in news_tables:
+                    conn.execute("DELETE FROM news_lists WHERE owner_email = ?", (owner,))
             else:
                 for table in (
                     "pipeline_events",
@@ -1848,6 +1852,10 @@ class Memory:
                     conn.execute("DELETE FROM news_items")
                 if "news_scans" in news_tables:
                     conn.execute("DELETE FROM news_scans")
+                if "news_list_items" in news_tables:
+                    conn.execute("DELETE FROM news_list_items")
+                if "news_lists" in news_tables:
+                    conn.execute("DELETE FROM news_lists")
             if not keep_page_cache:
                 conn.execute("DELETE FROM page_cache")
 

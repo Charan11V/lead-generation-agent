@@ -538,6 +538,50 @@ div[data-baseweb="tab-list"] {
   border: 1px solid var(--border-subtle); background: var(--surface-1);
   border-radius: 12px; padding: 14px 16px; margin: 0 0 8px;
 }
+.fx-pipe-card.fx-pipe-news-event {
+  border-color: #b45309;
+  background: linear-gradient(135deg, rgba(180, 83, 9, 0.10), var(--surface-1) 55%);
+  box-shadow: inset 3px 0 0 #b45309;
+}
+.badge.news-event {
+  border-color: #b45309; color: #92400e; background: rgba(180, 83, 9, 0.14);
+  font-weight: 700;
+}
+.fx-pill-enriched {
+  border: 1px solid var(--success); color: var(--success); background: var(--success-soft);
+  display: inline-block; margin: 0 0 8px; padding: 4px 12px; border-radius: 999px;
+  font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+}
+.fx-pill-warn {
+  border: 1px solid var(--warning); color: var(--warning); background: var(--warning-soft);
+  display: inline-block; margin: 0 0 8px; padding: 4px 12px; border-radius: 999px;
+  font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+}
+.fx-pill-not-enriched {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--warning);
+  background: linear-gradient(135deg, var(--warning-soft), rgba(232, 165, 75, 0.28));
+  color: #f0c078;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  box-shadow: 0 0 0 1px rgba(232, 165, 75, 0.25), inset 3px 0 0 var(--warning);
+}
+.fx-pill-not-enriched::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warning);
+  box-shadow: 0 0 0 3px rgba(232, 165, 75, 0.35);
+  flex-shrink: 0;
+}
 .fx-pipe-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .fx-pipe-card h3 {
   font-family: "Syne", sans-serif; font-size: 18px; margin: 2px 0 6px;
@@ -615,6 +659,57 @@ div[data-baseweb="tab-list"] {
   padding: 8px 0; border-top: 1px solid var(--border-subtle);
   font-size: 13px; color: var(--text-primary);
 }
+
+/* ── News deep-research dossier ── */
+.fx-news-research-hero {
+  margin: 0.35rem 0 1rem;
+  padding: 1rem 1.15rem 1.05rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background:
+    linear-gradient(135deg, rgba(180, 83, 9, 0.12), transparent 48%),
+    var(--surface-1);
+  box-shadow: inset 3px 0 0 #b45309;
+}
+.fx-news-research-hero .fx-kicker {
+  margin: 0 0 0.35rem;
+  color: #d97706;
+  letter-spacing: .12em;
+}
+.fx-news-research-hero h2 {
+  font-family: "Syne", sans-serif;
+  font-size: clamp(1.15rem, 2.2vw, 1.45rem);
+  font-weight: 600;
+  line-height: 1.3;
+  margin: 0 0 0.45rem;
+  color: var(--text-primary);
+}
+.fx-news-research-shell {
+  margin: 0 0 1.25rem;
+  padding: 1rem 1.1rem 1.15rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--surface-1);
+}
+.fx-news-research-shell .fx-detail { margin: 0; }
+.fx-news-outreach-head {
+  margin: 0.25rem 0 0.85rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--border-subtle);
+}
+.fx-news-outreach-head h3 {
+  font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--text-tertiary); margin: 0 0 6px; font-weight: 500;
+}
+.fx-news-outreach-head p {
+  margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.45;
+}
+.fx-news-msg-label {
+  margin: 0.85rem 0 0.35rem;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+.fx-news-msg-label strong { font-weight: 600; }
 
 /* ── Lead detail ── */
 .fx-detail { color: var(--text-primary); }
@@ -1380,6 +1475,48 @@ button[kind="tertiaryFormSubmit"] [data-testid="stMarkdownContainer"] p,
   letter-spacing: 0.04em;
   color: var(--text-tertiary);
 }
+.fx-news-lists {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  margin: 0.45rem 0 0.65rem;
+  padding: 8px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-1);
+}
+.fx-news-lists-empty {
+  opacity: 0.85;
+}
+.fx-news-lists-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+.fx-news-lists-none {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+.fx-news-lists-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.fx-news-list-chip {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(61, 184, 212, 0.45);
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .01em;
+}
 .fx-eval-row {
   display: flex; align-items: center; gap: 10px;
   margin: 2px 0 14px; min-height: 28px;
@@ -1695,7 +1832,16 @@ def _esc(text: str) -> str:
 def _link(url: str, label: str | None = None) -> str:
     if not url:
         return "—"
-    lab = html.escape(label or re.sub(r"^https?://(www\.)?", "", url).rstrip("/"))
+    if label:
+        lab = html.escape(label)
+    else:
+        cleaned = re.sub(r"^https?://(www\.)?", "", url).rstrip("/")
+        # Keep path-heavy aggregator URLs readable in dossiers.
+        if len(cleaned) > 72:
+            host = cleaned.split("/", 1)[0]
+            lab = html.escape(f"{host}/…")
+        else:
+            lab = html.escape(cleaned)
     return f'<a href="{html.escape(url)}" target="_blank" rel="noopener">{lab}</a>'
 
 
